@@ -1,0 +1,4 @@
+github.com/NicoNex/echotron/v3 v3.23.3 h1:O0WWlfV5GJovivhlC6c9xqLU2VH+d/3wssDjZP7WdlE=
+github.com/NicoNex/echotron/v3 v3.23.3/go.mod h1:LpP5IyHw0y+DZUZMBgXEDAF9O8feXrQu7w7nlJzzoZI=
+github.com/sashabaranov/go-openai v1.5.3 h1:o6n6dj0h9u+5mE1m+D8eT0zYhh7229o8ymDd2zDwAXU=
+github.com/sashabaranov/go-openai v1.5.3/go.mod h1:lj5b/K+zjTSFxVLijLSTDZuP7adOgerWeFyZLUhAKRg=

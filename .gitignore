@@ -1,0 +1,6 @@
+# config file
+openai_api_key
+admin
+telegram_token
+elevenlabs_api_key
+users.json

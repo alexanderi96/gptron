@@ -56,7 +56,7 @@ func init() {
 	}
 
 	dsp = echotron.NewDispatcher(telegramToken, newBot)
-	go setCommands()
+	//go setCommands()
 
 }
 
@@ -92,6 +92,66 @@ func main() {
 	}
 }
 
+func (b *bot) handleNewUser() {
+	user := session.NewUser(strconv.Itoa(int(b.chatID)) == admin, b.chatID)
+
+	b.Users[b.chatID] = user
+	b.notifyAdmin(b.chatID)
+
+	b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
+}
+
+func (b *bot) handleUserApproval(msg string, user *session.User) {
+	if !user.IsAdmin {
+		b.SendMessage("Only admins can use this command", b.chatID, nil)
+		return
+	}
+	slice := strings.Split(msg, " ")
+
+	if len(slice) != 2 && utils.IsNumber(slice[1]) {
+		b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, nil)
+		return
+	}
+	userChatID, _ := strconv.Atoi(slice[1])
+
+	if slice[0] == "/whitelist" {
+		if b.Users[int64(userChatID)].Status == session.Whitelisted {
+			b.SendMessage("User "+slice[1]+" already whitelisted", b.chatID, nil)
+			return
+		}
+		b.Users[int64(userChatID)].Status = session.Whitelisted
+		b.SendMessage("You have been whitelisted", int64(userChatID), nil)
+	} else if slice[0] == "/blacklist" {
+		if b.Users[int64(userChatID)].Status == session.Blacklisted {
+			b.SendMessage("User "+slice[1]+" already blacklisted", b.chatID, nil)
+			return
+		}
+		b.Users[int64(userChatID)].Status = session.Blacklisted
+		b.SendMessage("You have been blacklisted", int64(userChatID), nil)
+	}
+}
+
+func (b *bot) handleSelect(msg string) {
+	slice := strings.Split(msg, " ")
+
+	if len(slice) < 2 && utils.IsUUID(slice[len(slice)-1]) {
+		b.SendMessage("Invalid chat ID", b.chatID, nil)
+		return
+	}
+
+	argID, _ := uuid.Parse(slice[len(slice)-1])
+
+	if b.Users[b.chatID].Conversations[argID] == nil {
+		b.SendMessage("Conversation "+argID.String()+" not found", b.chatID, nil)
+		return
+	}
+
+	log.Println("Selected conversation: ", argID)
+	b.SendMessage("Switched to conversation "+argID.String(), b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton(), ParseMode: echotron.Markdown})
+
+	b.Users[b.chatID].SelectedConversation = argID
+	b.Users[b.chatID].MenuState = session.MenuStateSelected
+}
 func (b *bot) Update(update *echotron.Update) {
 	log.Printf("Message recieved from: " + strconv.FormatInt(b.chatID, 10))
 
@@ -100,25 +160,7 @@ func (b *bot) Update(update *echotron.Update) {
 
 	user, exists := b.Users[b.chatID]
 	if !exists {
-
-		user = &session.User{
-			Status:               session.Unreviewed,
-			IsAdmin:              strconv.Itoa(int(b.chatID)) == admin,
-			Conversations:        make(map[uuid.UUID]*session.Conversation),
-			SelectedConversation: uuid.Nil,
-		}
-
-		b.Users[b.chatID] = user
-		b.notifyAdmin(b.chatID)
-
-		rpl, err := gpt.SendTextToChatGPT(gpt.MustBeApproved(defaultGptEngine))
-		if err != nil {
-			log.Println(err)
-			b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
-		} else {
-			b.SendMessage(rpl, b.chatID, nil)
-		}
-
+		b.handleNewUser()
 		return
 
 	} else if !user.IsAdmin {
@@ -140,74 +182,22 @@ func (b *bot) Update(update *echotron.Update) {
 	case strings.HasPrefix(msg, "/ping"):
 		b.SendMessage("pong", b.chatID, nil)
 
-	case strings.HasPrefix(msg, "/whitelist"):
-		if !user.IsAdmin {
-			b.SendMessage("Only admins can use this command", b.chatID, nil)
-			return
-		}
-		slice := strings.Split(msg, " ")
-
-		if len(slice) != 2 && utils.IsNumber(slice[1]) {
-			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, nil)
-			return
-		}
-		userChatID, _ := strconv.Atoi(slice[1])
-
-		if b.Users[int64(userChatID)].Status == session.Whitelisted {
-			b.SendMessage("User "+slice[1]+" already whitelisted", b.chatID, nil)
-			return
-		}
-		b.Users[int64(userChatID)].Status = session.Whitelisted
-		b.SendMessage("You have been whitelisted", int64(userChatID), nil)
-
-		b.SendMessage("User "+slice[1]+" has been whitelisted", b.chatID, nil)
-
-	case strings.HasPrefix(msg, "/blacklist"):
-		if !user.IsAdmin {
-			b.SendMessage("Only admins can use this command", b.chatID, nil)
-			return
-		}
-		slice := strings.Split(msg, " ")
-
-		if len(slice) != 2 && utils.IsNumber(slice[1]) {
-			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, nil)
-			return
-		}
-		userChatID, _ := strconv.Atoi(slice[1])
-
-		if b.Users[int64(userChatID)].Status == session.Blacklisted {
-			b.SendMessage("User "+slice[1]+" already blacklisted", b.chatID, nil)
-			return
-		}
-		b.Users[int64(userChatID)].Status = session.Blacklisted
-		b.SendMessage("You have been blacklisted", int64(userChatID), nil)
-
-		b.SendMessage("User "+slice[1]+" has been blacklisted", b.chatID, nil)
+	case strings.HasPrefix(msg, "/whitelist"), strings.HasPrefix(msg, "/blacklist"):
+		b.handleUserApproval(msg, user)
 
 	case strings.HasPrefix(msg, "/list"):
+		b.SendMessage(
+			"Select a conversation from the list or start a new one",
+			b.chatID,
+			&echotron.MessageOptions{
+				ReplyMarkup: b.getListOfChats(),
+				ParseMode:   echotron.Markdown,
+			},
+		)
 		user.MenuState = session.MenuStateList
-		b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
 
 	case strings.HasPrefix(msg, "/select"):
-		slice := strings.Split(msg, " ")
-
-		if len(slice) != 2 && utils.IsUUID(slice[1]) {
-			b.SendMessage("Invalid chat ID", b.chatID, nil)
-			return
-		}
-
-		chatID, _ := uuid.Parse(slice[1])
-
-		if b.Users[b.chatID].Conversations[chatID] == nil {
-			b.SendMessage("Conversation "+slice[1]+" not found", b.chatID, nil)
-			return
-		}
-
-		log.Println("Selected conversation: ", chatID)
-		b.SendMessage("Conversation "+slice[1]+" selected", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton(), ParseMode: echotron.Markdown})
-
-		b.Users[b.chatID].SelectedConversation = chatID
-		b.Users[b.chatID].MenuState = session.MenuStateSelected
+		b.handleSelect(msg)
 
 	case strings.HasPrefix(msg, "/back"):
 		if user.MenuState == session.MenuStateSelected {
@@ -217,27 +207,25 @@ func (b *bot) Update(update *echotron.Update) {
 			user.MenuState = session.MenuStateMain
 			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
 		}
-		return
+
+	case strings.HasPrefix(msg, "/home"):
+		user.MenuState = session.MenuStateMain
+		b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
 
 	case strings.HasPrefix(msg, "/new"):
 		user.MenuState = session.MenuStateSelected
 
 		user.CreateNewConversation(defaultGptEngine, strconv.Itoa(int(b.chatID)))
 
-		rpl, err := gpt.SendTextToChatGPT(gpt.NewChat(defaultGptEngine))
-		if err != nil {
-			log.Println(err)
-			b.SendMessage("You may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
-		} else {
-			b.SendMessage(rpl, b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
-		}
-		return
+		b.SendMessage("You may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
 
 	default:
 		if user.MenuState != session.MenuStateSelected {
-			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
+			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu()})
 			return
 		}
+
+		selectedConversation := user.Conversations[user.SelectedConversation]
 
 		initialMessage, err := b.SendMessage("Analizing message...", b.chatID, nil)
 		if err != nil {
@@ -267,7 +255,15 @@ func (b *bot) Update(update *echotron.Update) {
 			log.Printf("Error editing message %d: %s", b.chatID, err)
 			return
 		}
-		response, err := gpt.SendMessagesToChatGPT(*user.AppendMessageAndGetConversation(msg), defaultGptEngine)
+
+		selectedConversation.AppendMessage(msg, selectedConversation.UserRole)
+
+		if selectedConversation.Title == "" {
+			selectedConversation.Title, _ = gpt.SendMessagesToChatGPT(*gpt.GetTitle(defaultGptEngine, msg))
+		}
+
+		response, err := gpt.SendMessagesToChatGPT(*selectedConversation.Content)
+
 		if err != nil {
 			errorMessage := fmt.Errorf("error contacting ChatGPT: %s", err)
 			log.Println(errorMessage)
@@ -300,6 +296,8 @@ func (b *bot) Update(update *echotron.Update) {
 			} else {
 				b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
 			}
+			selectedConversation.AppendMessage(response, selectedConversation.AssistantRole)
+
 		}
 	}
 	b.saveUsers("users.json")
@@ -424,7 +422,13 @@ func (b *bot) getListOfChats() *echotron.ReplyKeyboardMarkup {
 	}
 
 	for _, conv := range b.Users[b.chatID].Conversations {
-		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/select " + conv.ID.String()}})
+		command := "/select "
+		if conv.Title == "" {
+			command += conv.ID.String()
+		} else {
+			command += conv.Title + " " + conv.ID.String()
+		}
+		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: command}})
 	}
 
 	return menu

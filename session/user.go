@@ -1,6 +1,8 @@
 package session
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/sashabaranov/go-openai"
 )
@@ -18,29 +20,32 @@ const (
 )
 
 type User struct {
+	ChatID               int64
 	Status               UserStatus
 	IsAdmin              bool
 	Conversations        map[uuid.UUID]*Conversation
 	SelectedConversation uuid.UUID `json:"-"`
 	MenuState            string    `json:"-"`
+	CreationTime         time.Time
+	LastUpdate           time.Time
 }
 
 type Conversation struct {
-	ID      uuid.UUID
-	Content *openai.ChatCompletionRequest
+	ID            uuid.UUID
+	Title         string
+	Content       *openai.ChatCompletionRequest
+	UserRole      string
+	AssistantRole string
+	CreationTime  time.Time
+	LastUpdate    time.Time
 }
 
-func createMessage(text string) *openai.ChatCompletionMessage {
-	return &openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: text,
-	}
-}
-
-func (u *User) AppendMessageAndGetConversation(text string) *[]openai.ChatCompletionMessage {
-	u.Conversations[u.SelectedConversation].Content.Messages = append([]openai.ChatCompletionMessage{*createMessage(text)}, u.Conversations[u.SelectedConversation].Content.Messages...)
-
-	return &u.Conversations[u.SelectedConversation].Content.Messages
+func (c *Conversation) AppendMessage(message, role string) {
+	c.Content.Messages = append(c.Content.Messages, openai.ChatCompletionMessage{
+		Role:    role,
+		Content: message,
+	})
+	c.LastUpdate = time.Now()
 }
 
 func (u *User) CreateNewConversation(engineID, userID string) {
@@ -52,6 +57,22 @@ func (u *User) CreateNewConversation(engineID, userID string) {
 			Messages: make([]openai.ChatCompletionMessage, 0),
 			User:     userID,
 		},
+		UserRole:      openai.ChatMessageRoleUser,
+		AssistantRole: openai.ChatMessageRoleAssistant,
+		CreationTime:  time.Now(),
+		LastUpdate:    time.Now(),
 	}
 	u.SelectedConversation = convUuid
+}
+
+func NewUser(admin bool, userID int64) *User {
+	return &User{
+		ChatID:               userID,
+		Status:               Unreviewed,
+		IsAdmin:              admin,
+		Conversations:        make(map[uuid.UUID]*Conversation),
+		SelectedConversation: uuid.Nil,
+		CreationTime:         time.Now(),
+		LastUpdate:           time.Now(),
+	}
 }

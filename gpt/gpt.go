@@ -9,8 +9,9 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-type WhisperResponse struct {
-	Transcript string `json:"transcript"`
+type Model struct {
+	EngineID string
+	// parameters in order to keep track of the costs
 }
 
 var (
@@ -29,6 +30,15 @@ func init() {
 	client = openai.NewClient(openaiApiKey)
 }
 
+func ListAvailableModels() (*openai.EnginesList, error) {
+	engines, err := client.ListEngines(context.Background())
+	if err != nil {
+		log.Print("ListEngines error: ", err)
+		return &openai.EnginesList{}, err
+	}
+	return &engines, nil
+}
+
 func SendVoiceToWhisper(voicePath string) (string, error) {
 	resp, err := client.CreateTranscription(context.Background(), openai.AudioRequest{
 		Model:    openai.Whisper1,
@@ -43,14 +53,11 @@ func SendVoiceToWhisper(voicePath string) (string, error) {
 	return resp.Text, nil
 }
 
-func SendMessagesToChatGPT(messages []openai.ChatCompletionMessage, engineID string) (string, error) {
+func SendMessagesToChatGPT(ctx openai.ChatCompletionRequest) (string, error) {
 
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
-		openai.ChatCompletionRequest{
-			Model:    engineID,
-			Messages: messages,
-		},
+		ctx,
 	)
 
 	if err != nil {

@@ -1,0 +1,75 @@
+package gpt
+
+import (
+	_ "embed"
+
+	"context"
+	"log"
+
+	"github.com/sashabaranov/go-openai"
+)
+
+type WhisperResponse struct {
+	Transcript string `json:"transcript"`
+}
+
+var (
+	//go:embed openai_api_key
+	openaiApiKey string
+
+	client *openai.Client
+)
+
+func init() {
+
+	if len(openaiApiKey) == 0 {
+		log.Fatal("openai_api_key not set")
+	}
+
+	client = openai.NewClient(openaiApiKey)
+}
+
+func SendVoiceToWhisper(voicePath string) (string, error) {
+	resp, err := client.CreateTranscription(context.Background(), openai.AudioRequest{
+		Model:    openai.Whisper1,
+		FilePath: voicePath,
+	})
+
+	if err != nil {
+		log.Print("ChatCompletion error: ", err)
+		return "", err
+	}
+
+	return resp.Text, nil
+}
+
+func SendMessagesToChatGPT(messages []openai.ChatCompletionMessage, engineID string) (string, error) {
+
+	resp, err := client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model:    engineID,
+			Messages: messages,
+		},
+	)
+
+	if err != nil {
+		log.Print("ChatCompletion error: ", err)
+		return "", err
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+func SendTextToChatGPT(message *openai.CompletionRequest) (string, error) {
+	resp, err := client.CreateCompletion(
+		context.Background(),
+		*message,
+	)
+
+	if err != nil {
+		log.Print("Completion error: ", err)
+		return "", err
+	}
+	return resp.Choices[0].Text, nil
+}

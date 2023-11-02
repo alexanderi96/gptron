@@ -1,159 +1,79 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"mime/multipart"
-	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/NicoNex/echotron/v3"
-
-	openai "github.com/sashabaranov/go-openai"
+	"github.com/alexanderi96/gptron/elevenlabs"
+	"github.com/alexanderi96/gptron/gpt"
+	"github.com/alexanderi96/gptron/session"
+	"github.com/alexanderi96/gptron/utils"
+	"github.com/google/uuid"
 )
-
-type UserStatus int
-
-const (
-	Unreviewed UserStatus = iota
-	Whitelisted
-	Blacklisted
-)
-
-type WhisperResponse struct {
-	Transcript string `json:"transcript"`
-}
-
-type User struct {
-	Status UserStatus
-}
-
-type Conversation struct {
-	Messages []string
-}
-
-var userConversations map[int64]*Conversation
 
 type bot struct {
 	chatID int64
 	echotron.API
+	Users map[int64]*session.User
 }
 
 var (
 	//go:embed telegram_token
 	telegramToken string
 
-	//go:embed openai_api_key
-	openaiApiKey string
-
-	//go:embed elevenlabs_api_key
-	elevenlabsApiKey string
-
 	//go:embed admin
 	admin string
 
-	//dsp *echotron.Dispatcher
-
-	client *openai.Client
+	dsp *echotron.Dispatcher
 
 	commands = []echotron.BotCommand{
 		{Command: "/start", Description: "start bot"},
+		{Command: "/list", Description: "show all conversations"},
+		{Command: "/select", Description: "select conversation"},
 		{Command: "/ping", Description: "check bot status"},
 		{Command: "/help", Description: "help"},
 		{Command: "/whitelist", Description: "whitelist user"},
 		{Command: "/blacklist", Description: "blacklist user"},
 	}
 
-	users map[int64]*User
-
-	parseMarkdown = &echotron.MessageOptions{ParseMode: echotron.Markdown}
-
-	isNumber = regexp.MustCompile(`^\d+$`).MatchString
+	defaultGptEngine = "gpt-4"
 )
 
 func init() {
 	if len(telegramToken) == 0 {
-		log.Fatal("Empty telegram_token file")
+		log.Fatal("telegram_token not set")
 	}
 
 	if len(admin) == 0 {
-		log.Fatal("Empty admin file")
+		log.Fatal("admin not set")
 	}
 
-	if len(openaiApiKey) == 0 {
-		log.Fatal("Empty openai_api_key file")
-	}
-
-	if len(elevenlabsApiKey) == 0 {
-		log.Fatal("Empty elevenlabs_api_key file")
-	}
-
-	client = openai.NewClient(openaiApiKey)
-
+	dsp = echotron.NewDispatcher(telegramToken, newBot)
 	go setCommands()
 
-	err := loadUsers("users.json")
-	if err != nil {
-		log.Fatalf("failed to load users: %v", err)
-	}
-
-	userConversations = make(map[int64]*Conversation)
 }
 
-func saveUsers(filePath string) error {
+func newBot(chatID int64) echotron.Bot {
+	bot := &bot{
+		chatID,
+		echotron.NewAPI(telegramToken),
+		make(map[int64]*session.User),
+	}
 
-	jsonData, err := json.MarshalIndent(users, "", "  ")
+	err := bot.loadUsers("users.json")
 	if err != nil {
-		return fmt.Errorf("failed to marshal users: %w", err)
+		log.Fatalf("Failed to load user list: %x", err)
 	}
 
-	err = os.WriteFile(filePath, jsonData, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
-	}
-
-	return nil
-}
-
-func loadUsers(filePath string) error {
-
-	_, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
-		users = make(map[int64]*User)
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to stat file: %w", err)
-	}
-
-	jsonData, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-
-	err = json.Unmarshal(jsonData, &users)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal users: %w", err)
-	}
-
-	return nil
-}
-
-func updateConversation(chatID int64, message string) {
-	conversation, exists := userConversations[chatID]
-	if !exists {
-		conversation = &Conversation{}
-		userConversations[chatID] = conversation
-	}
-	conversation.Messages = append(conversation.Messages, message)
+	//go bot.selfDestruct(time.After(time.Hour))
+	return bot
 }
 
 func setCommands() {
@@ -161,13 +81,229 @@ func setCommands() {
 	api.SetMyCommands(nil, commands...)
 }
 
-func newBot(chatID int64) echotron.Bot {
-	bot := &bot{
-		chatID,
-		echotron.NewAPI(telegramToken),
+func main() {
+	log.Printf("Running GPTronBot...")
+
+	for {
+		log.Println(dsp.Poll())
+		log.Printf("Lost connection, waiting one minute...")
+
+		time.Sleep(1 * time.Minute)
 	}
-	//go bot.selfDestruct(time.After(time.Hour))
-	return bot
+}
+
+func (b *bot) Update(update *echotron.Update) {
+	log.Printf("Message recieved from: " + strconv.FormatInt(b.chatID, 10))
+
+	msg := message(update)
+	replyWithVoice := false
+
+	user, exists := b.Users[b.chatID]
+	if !exists {
+
+		user = &session.User{
+			Status:               session.Unreviewed,
+			IsAdmin:              strconv.Itoa(int(b.chatID)) == admin,
+			Conversations:        make(map[uuid.UUID]*session.Conversation),
+			SelectedConversation: uuid.Nil,
+		}
+
+		b.Users[b.chatID] = user
+		b.notifyAdmin(b.chatID)
+
+		rpl, err := gpt.SendTextToChatGPT(gpt.MustBeApproved(defaultGptEngine))
+		if err != nil {
+			log.Println(err)
+			b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
+		} else {
+			b.SendMessage(rpl, b.chatID, nil)
+		}
+
+		return
+
+	} else if !user.IsAdmin {
+		switch user.Status {
+		case session.Unreviewed:
+			b.SendMessage("👀", b.chatID, nil)
+			return
+
+		case session.Blacklisted:
+			b.SendMessage("💀", b.chatID, nil)
+			return
+
+		case session.Whitelisted:
+		default:
+		}
+	}
+
+	switch {
+	case strings.HasPrefix(msg, "/ping"):
+		b.SendMessage("pong", b.chatID, nil)
+
+	case strings.HasPrefix(msg, "/whitelist"):
+		if !user.IsAdmin {
+			b.SendMessage("Only admins can use this command", b.chatID, nil)
+			return
+		}
+		slice := strings.Split(msg, " ")
+
+		if len(slice) != 2 && utils.IsNumber(slice[1]) {
+			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, nil)
+			return
+		}
+		userChatID, _ := strconv.Atoi(slice[1])
+
+		if b.Users[int64(userChatID)].Status == session.Whitelisted {
+			b.SendMessage("User "+slice[1]+" already whitelisted", b.chatID, nil)
+			return
+		}
+		b.Users[int64(userChatID)].Status = session.Whitelisted
+		b.SendMessage("You have been whitelisted", int64(userChatID), nil)
+
+		b.SendMessage("User "+slice[1]+" has been whitelisted", b.chatID, nil)
+
+	case strings.HasPrefix(msg, "/blacklist"):
+		if !user.IsAdmin {
+			b.SendMessage("Only admins can use this command", b.chatID, nil)
+			return
+		}
+		slice := strings.Split(msg, " ")
+
+		if len(slice) != 2 && utils.IsNumber(slice[1]) {
+			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, nil)
+			return
+		}
+		userChatID, _ := strconv.Atoi(slice[1])
+
+		if b.Users[int64(userChatID)].Status == session.Blacklisted {
+			b.SendMessage("User "+slice[1]+" already blacklisted", b.chatID, nil)
+			return
+		}
+		b.Users[int64(userChatID)].Status = session.Blacklisted
+		b.SendMessage("You have been blacklisted", int64(userChatID), nil)
+
+		b.SendMessage("User "+slice[1]+" has been blacklisted", b.chatID, nil)
+
+	case strings.HasPrefix(msg, "/list"):
+		user.MenuState = session.MenuStateList
+		b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
+
+	case strings.HasPrefix(msg, "/select"):
+		slice := strings.Split(msg, " ")
+
+		if len(slice) != 2 && utils.IsUUID(slice[1]) {
+			b.SendMessage("Invalid chat ID", b.chatID, nil)
+			return
+		}
+
+		chatID, _ := uuid.Parse(slice[1])
+
+		if b.Users[b.chatID].Conversations[chatID] == nil {
+			b.SendMessage("Conversation "+slice[1]+" not found", b.chatID, nil)
+			return
+		}
+
+		log.Println("Selected conversation: ", chatID)
+		b.SendMessage("Conversation "+slice[1]+" selected", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton(), ParseMode: echotron.Markdown})
+
+		b.Users[b.chatID].SelectedConversation = chatID
+		b.Users[b.chatID].MenuState = session.MenuStateSelected
+
+	case strings.HasPrefix(msg, "/back"):
+		if user.MenuState == session.MenuStateSelected {
+			user.MenuState = session.MenuStateList
+			b.SendMessage("Select a conversation from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
+		} else if user.MenuState == session.MenuStateList {
+			user.MenuState = session.MenuStateMain
+			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
+		}
+		return
+
+	case strings.HasPrefix(msg, "/new"):
+		user.MenuState = session.MenuStateSelected
+
+		user.CreateNewConversation(defaultGptEngine, strconv.Itoa(int(b.chatID)))
+
+		rpl, err := gpt.SendTextToChatGPT(gpt.NewChat(defaultGptEngine))
+		if err != nil {
+			log.Println(err)
+			b.SendMessage("You may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
+		} else {
+			b.SendMessage(rpl, b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
+		}
+		return
+
+	default:
+		if user.MenuState != session.MenuStateSelected {
+			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
+			return
+		}
+
+		initialMessage, err := b.SendMessage("Analizing message...", b.chatID, nil)
+		if err != nil {
+			log.Printf("Error sending initial message to %d: %s", b.chatID, err)
+			return
+		}
+
+		initialMessageID := echotron.NewMessageID(b.chatID, initialMessage.Result.ID)
+
+		if update.Message != nil && update.Message.Voice != nil {
+			var err error
+			replyWithVoice = true
+			log.Printf("Transcribing %d's message", b.chatID)
+			b.EditMessageText("Transcribing message...", initialMessageID, nil)
+
+			if msg, err = b.transcript(update.Message.Voice.FileID); err != nil {
+				errorMessage := fmt.Errorf("error transcribing message: %s", err)
+				log.Println(errorMessage)
+				b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
+			}
+		}
+
+		log.Printf("Sending %d's message to ChatGPT", b.chatID)
+		_, err = b.EditMessageText("Sending message to ChatGPT...", initialMessageID, nil)
+
+		if err != nil {
+			log.Printf("Error editing message %d: %s", b.chatID, err)
+			return
+		}
+		response, err := gpt.SendMessagesToChatGPT(*user.AppendMessageAndGetConversation(msg), defaultGptEngine)
+		if err != nil {
+			errorMessage := fmt.Errorf("error contacting ChatGPT: %s", err)
+			log.Println(errorMessage)
+			b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
+
+		} else {
+			log.Printf("Sending response to %d", b.chatID)
+			b.EditMessageText("Elaborating response...", initialMessageID, nil)
+
+			if replyWithVoice {
+				b.EditMessageText("Obtaining audio...", initialMessageID, nil)
+
+				audioLocation, ttsErr := elevenlabs.TextToSpeech(response)
+				if ttsErr != nil {
+					errorMessage := fmt.Errorf("error generating speech from text: %s", ttsErr)
+					log.Println(errorMessage)
+					b.EditMessageText(response+"\n\n"+errorMessage.Error(), initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+				} else {
+					log.Printf("Sending audio to %d", b.chatID)
+
+					_, err = b.SendVoice(echotron.NewInputFilePath(audioLocation), b.chatID, &echotron.VoiceOptions{ParseMode: echotron.Markdown, Caption: response})
+					if err != nil {
+						errorMessage := fmt.Errorf("error sending audio to %d: %s", b.chatID, err)
+						log.Println(errorMessage)
+						b.EditMessageText(response+"\n\n"+"error sending audio response", initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+					} else {
+						b.DeleteMessage(b.chatID, initialMessage.Result.ID)
+					}
+				}
+			} else {
+				b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+			}
+		}
+	}
+	b.saveUsers("users.json")
+
 }
 
 func message(update *echotron.Update) string {
@@ -183,135 +319,41 @@ func message(update *echotron.Update) string {
 	return ""
 }
 
-func (b *bot) Update(update *echotron.Update) {
-	msg := message(update)
-	replyWithVoice := false
-	isAdmin := strconv.Itoa(int(b.chatID)) == admin
-	log.Printf("Message recieved from: " + strconv.FormatInt(b.chatID, 10))
+func (b *bot) saveUsers(filePath string) error {
 
-	user, exists := users[b.chatID]
-	if !exists && !isAdmin {
-
-		user = &User{Status: Unreviewed}
-		users[b.chatID] = user
-		b.notifyAdmin(b.chatID)
-		b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, parseMarkdown)
-
-		return
-
-	} else if !isAdmin {
-		switch user.Status {
-		case Unreviewed:
-
-			b.SendMessage("👀", b.chatID, parseMarkdown)
-			return
-		case Blacklisted:
-
-			b.SendMessage("💀", b.chatID, parseMarkdown)
-
-			return
-		case Whitelisted:
-
-		default:
-		}
+	jsonData, err := json.MarshalIndent(b.Users, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal users map: %w", err)
 	}
 
-	if update.Message != nil && update.Message.Voice != nil {
-		var err error
-
-		replyWithVoice = true
-
-		if msg, err = b.transcript(update.Message.Voice.FileID); err != nil {
-			log.Printf("Error transcribing message: %x", err)
-			b.SendMessage("Error transcribing message", b.chatID, parseMarkdown)
-		}
-
+	err = os.WriteFile(filePath, jsonData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
 	}
 
-	switch {
-	case strings.HasPrefix(msg, "/ping"):
-		b.SendMessage("pong", b.chatID, parseMarkdown)
+	return nil
+}
 
-	case strings.HasPrefix(msg, "/whitelist"):
-		if !isAdmin {
-			b.SendMessage("Only admins can use this command", b.chatID, parseMarkdown)
-			return
-		}
-		slice := strings.Split(msg, " ")
+func (b *bot) loadUsers(filePath string) error {
 
-		if len(slice) != 2 && isNumber(slice[1]) {
-			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, parseMarkdown)
-			return
-		}
-		userChatID, _ := strconv.Atoi(slice[1])
-
-		if users[int64(userChatID)].Status == Whitelisted {
-			b.SendMessage("User "+slice[1]+" already whitelisted", b.chatID, parseMarkdown)
-			return
-		}
-		users[int64(userChatID)].Status = Whitelisted
-		b.SendMessage("You have been whitelisted", int64(userChatID), parseMarkdown)
-
-		saveUsers("users.json")
-		b.SendMessage("User "+slice[1]+" has been whitelisted", b.chatID, parseMarkdown)
-
-	case strings.HasPrefix(msg, "/blacklist"):
-		if !isAdmin {
-			b.SendMessage("Only admins can use this command", b.chatID, parseMarkdown)
-			return
-		}
-		slice := strings.Split(msg, " ")
-
-		if len(slice) != 2 && isNumber(slice[1]) {
-			b.SendMessage("Invalid chat ID: "+slice[1], b.chatID, parseMarkdown)
-			return
-		}
-		userChatID, _ := strconv.Atoi(slice[1])
-
-		if users[int64(userChatID)].Status == Blacklisted {
-			b.SendMessage("User "+slice[1]+" already blacklisted", b.chatID, parseMarkdown)
-			return
-		}
-		users[int64(userChatID)].Status = Blacklisted
-		b.SendMessage("You have been blacklisted", int64(userChatID), parseMarkdown)
-
-		saveUsers("users.json")
-		b.SendMessage("User "+slice[1]+" has been blacklisted", b.chatID, parseMarkdown)
-
-	default:
-
-		initialMessage, err := b.SendMessage("Analizing message...", b.chatID, parseMarkdown)
-		if err != nil {
-			log.Printf("Error sending initial message to %d: %x", b.chatID, err)
-			return
-		}
-
-		initialMessageID := echotron.NewMessageID(b.chatID, initialMessage.Result.ID)
-
-		log.Printf("Sending %d's message to ChatGPT", b.chatID)
-		response, err := SendMessageToChatGPT(b.chatID, msg, "gpt-4")
-		if err != nil {
-			errorMessage := fmt.Errorf("error contacting ChatGPT: %x", err)
-			log.Println(errorMessage.Error())
-			b.EditMessageText(errorMessage.Error(), initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-
-		} else {
-			log.Printf("Sending response to %d", b.chatID)
-
-			if replyWithVoice {
-				audioLocation, err := textToSpeech(response)
-				if err != nil {
-					errorMessage := fmt.Errorf("error generating speech from text: %x", err)
-					log.Println(errorMessage.Error())
-					b.EditMessageText(errorMessage.Error(), initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-				}
-				b.SendVoice(echotron.NewInputFilePath(audioLocation), b.chatID, nil)
-			} else {
-
-				b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-			}
-		}
+	_, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
 	}
+
+	jsonData, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	err = json.Unmarshal(jsonData, &b.Users)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal b.Users: %w", err)
+	}
+
+	return nil
 }
 
 func (b *bot) notifyAdmin(chatID int64) {
@@ -345,168 +387,60 @@ func (b *bot) transcript(fileID string) (string, error) {
 	fileMetadata, err := b.GetFile(fileID)
 
 	if err != nil {
-		return "", fmt.Errorf("error getting file Metadata: %x", err)
+		return "", fmt.Errorf("error getting file Metadata: %s", err)
 	}
 
-	file, err := b.DownloadFile(fileMetadata.Result.FilePath)
+	transcript, err := gpt.SendVoiceToWhisper(fileMetadata.Result.FilePath)
 	if err != nil {
-		return "", fmt.Errorf("error downloading file to be transcripted: %x", err)
-	}
-
-	transcript, err := sendVoiceToWhisper(file)
-	if err != nil {
-		return "", fmt.Errorf("error sending voice to Whisper: %x", err)
+		return "", fmt.Errorf("error sending voice to Whisper: %s", err)
 	}
 	return transcript, nil
 }
-func sendVoiceToWhisper(voiceData []byte) (string, error) {
-	var b bytes.Buffer
-	w := multipart.NewWriter(&b)
 
-	fw, err := w.CreateFormFile("file", "audio.mp3")
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(fw, bytes.NewReader(voiceData))
-	if err != nil {
-		return "", err
-	}
-
-	err = w.WriteField("model", "whisper-1")
-	if err != nil {
-		return "", err
-	}
-
-	err = w.Close()
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/audio/transcriptions", &b)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+openaiApiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var response map[string]interface{}
-	decoder := json.NewDecoder(resp.Body)
-	err = decoder.Decode(&response)
-	if err != nil {
-		return "", err
-	}
-
-	transcription, ok := response["text"].(string)
-	if !ok {
-		return "", fmt.Errorf("unexpected response format")
-	}
-
-	return transcription, nil
-}
-
-type ElevenLabsResponse struct {
-	AudioURL string `json:"audio_url"`
-}
-
-func textToSpeech(text string) (string, error) {
-	log.Printf("Converting text to speech")
-	url := "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM?optimize_streaming_latency=0&output_format=mp3_44100_128"
-
-	requestBody := map[string]interface{}{
-		"text":     text,
-		"model_id": "eleven_multilingual_v2",
-		"voice_settings": map[string]interface{}{
-			"stability":         0.5,
-			"similarity_boost":  0,
-			"style":             0,
-			"use_speaker_boost": true,
+func (b *bot) getMenu() *echotron.ReplyKeyboardMarkup {
+	return &echotron.ReplyKeyboardMarkup{
+		Keyboard: [][]echotron.KeyboardButton{
+			{
+				{Text: "/list", RequestContact: false, RequestLocation: false},
+				{Text: "/new", RequestContact: false, RequestLocation: false},
+			},
 		},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false,
+		Selective:       false,
 	}
-	jsonData, err := json.Marshal(requestBody)
-	if err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("xi-api-key", elevenlabsApiKey)
-	req.Header.Set("accept", "audio/mpeg")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("unexpected status code: %s", resp.Status)
-
-	} else if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	tempFile, err := os.CreateTemp("", "tts_audio_*.mp3")
-	if err != nil {
-		return "", err
-	}
-	defer tempFile.Close()
-
-	audioData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	_, err = tempFile.Write(audioData)
-	if err != nil {
-		return "", err
-	}
-	log.Printf("Audio saved")
-	return tempFile.Name(), nil
 }
 
-func SendMessageToChatGPT(chatID int64, message string, engineID string) (string, error) {
-	updateConversation(chatID, message)
-	conversation := userConversations[chatID]
-
-	var messages []openai.ChatCompletionMessage
-	for _, msg := range conversation.Messages {
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleUser,
-			Content: msg,
-		})
-	}
-
-	resp, err := client.CreateChatCompletion(
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model:    engineID,
-			Messages: messages,
+func (b *bot) getListOfChats() *echotron.ReplyKeyboardMarkup {
+	menu := &echotron.ReplyKeyboardMarkup{
+		Keyboard: [][]echotron.KeyboardButton{
+			{
+				{Text: "/back", RequestContact: false, RequestLocation: false},
+			},
 		},
-	)
-
-	if err != nil {
-		log.Print("ChatCompletion error: ", err)
-		return "", err
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false,
+		Selective:       false,
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	for _, conv := range b.Users[b.chatID].Conversations {
+		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/select " + conv.ID.String()}})
+	}
+
+	return menu
 }
 
-func main() {
-	dsp := echotron.NewDispatcher(telegramToken, newBot)
-	log.Printf("Running GPTronBot...")
-
-	for {
-		log.Println(dsp.Poll())
-		log.Printf("Lost connection, waiting one minute...")
-
-		time.Sleep(1 * time.Minute)
+func (b *bot) getBackButton() *echotron.ReplyKeyboardMarkup {
+	menu := &echotron.ReplyKeyboardMarkup{
+		Keyboard: [][]echotron.KeyboardButton{
+			{
+				{Text: "/back", RequestContact: false, RequestLocation: false},
+			},
+		},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false,
+		Selective:       false,
 	}
+
+	return menu
 }

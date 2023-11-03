@@ -44,6 +44,7 @@ var (
 	}
 
 	defaultGptEngine = "gpt-4"
+	replyWithVoice   = false
 )
 
 func init() {
@@ -145,18 +146,17 @@ func (b *bot) handleSelect(msg string) {
 		b.SendMessage("Conversation "+argID.String()+" not found", b.chatID, nil)
 		return
 	}
+	b.Users[b.chatID].MenuState = session.MenuStateSelected
 
 	log.Println("Selected conversation: ", argID)
-	b.SendMessage("Switched to conversation "+argID.String(), b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton(), ParseMode: echotron.Markdown})
+	b.SendMessage("Switched to conversation "+argID.String(), b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI(), ParseMode: echotron.Markdown})
 
 	b.Users[b.chatID].SelectedConversation = argID
-	b.Users[b.chatID].MenuState = session.MenuStateSelected
 }
 func (b *bot) Update(update *echotron.Update) {
 	log.Printf("Message recieved from: " + strconv.FormatInt(b.chatID, 10))
 
 	msg := message(update)
-	replyWithVoice := false
 
 	user, exists := b.Users[b.chatID]
 	if !exists {
@@ -178,6 +178,11 @@ func (b *bot) Update(update *echotron.Update) {
 		}
 	}
 
+	user.LastUpdate = time.Now()
+	if user.MenuState == "" {
+		user.MenuState = session.MenuStateMain
+	}
+
 	switch {
 	case strings.HasPrefix(msg, "/ping"):
 		b.SendMessage("pong", b.chatID, nil)
@@ -186,6 +191,7 @@ func (b *bot) Update(update *echotron.Update) {
 		b.handleUserApproval(msg, user)
 
 	case strings.HasPrefix(msg, "/list"):
+		user.MenuState = session.MenuStateList
 		b.SendMessage(
 			"Select a conversation from the list or start a new one",
 			b.chatID,
@@ -194,7 +200,6 @@ func (b *bot) Update(update *echotron.Update) {
 				ParseMode:   echotron.Markdown,
 			},
 		)
-		user.MenuState = session.MenuStateList
 
 	case strings.HasPrefix(msg, "/select"):
 		b.handleSelect(msg)
@@ -205,103 +210,114 @@ func (b *bot) Update(update *echotron.Update) {
 			b.SendMessage("Select a conversation from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
 		} else if user.MenuState == session.MenuStateList {
 			user.MenuState = session.MenuStateMain
-			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
+			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
 		}
 
 	case strings.HasPrefix(msg, "/home"):
 		user.MenuState = session.MenuStateMain
-		b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu(), ParseMode: echotron.Markdown})
+		b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
 
 	case strings.HasPrefix(msg, "/new"):
 		user.MenuState = session.MenuStateSelected
 
 		user.CreateNewConversation(defaultGptEngine, strconv.Itoa(int(b.chatID)))
 
-		b.SendMessage("You may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getBackButton()})
+		b.SendMessage("You may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI()})
+
+	case strings.HasPrefix(msg, "/stats"):
+		if user.MenuState == session.MenuStateMain {
+			b.SendMessage(user.GetGlobalStats(), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
+		} else if user.MenuState == session.MenuStateSelected {
+			b.SendMessage(user.GetConversationStats(user.SelectedConversation), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
+		}
 
 	default:
 		if user.MenuState != session.MenuStateSelected {
-			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMenu()})
+			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu()})
 			return
 		}
 
-		selectedConversation := user.Conversations[user.SelectedConversation]
-
-		initialMessage, err := b.SendMessage("Analizing message...", b.chatID, nil)
-		if err != nil {
-			log.Printf("Error sending initial message to %d: %s", b.chatID, err)
-			return
-		}
-
-		initialMessageID := echotron.NewMessageID(b.chatID, initialMessage.Result.ID)
-
-		if update.Message != nil && update.Message.Voice != nil {
-			var err error
-			replyWithVoice = true
-			log.Printf("Transcribing %d's message", b.chatID)
-			b.EditMessageText("Transcribing message...", initialMessageID, nil)
-
-			if msg, err = b.transcript(update.Message.Voice.FileID); err != nil {
-				errorMessage := fmt.Errorf("error transcribing message: %s", err)
-				log.Println(errorMessage)
-				b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
-			}
-		}
-
-		log.Printf("Sending %d's message to ChatGPT", b.chatID)
-		_, err = b.EditMessageText("Sending message to ChatGPT...", initialMessageID, nil)
-
-		if err != nil {
-			log.Printf("Error editing message %d: %s", b.chatID, err)
-			return
-		}
-
-		selectedConversation.AppendMessage(msg, selectedConversation.UserRole)
-
-		if selectedConversation.Title == "" {
-			selectedConversation.Title, _ = gpt.SendMessagesToChatGPT(*gpt.GetTitle(defaultGptEngine, msg))
-		}
-
-		response, err := gpt.SendMessagesToChatGPT(*selectedConversation.Content)
-
-		if err != nil {
-			errorMessage := fmt.Errorf("error contacting ChatGPT: %s", err)
-			log.Println(errorMessage)
-			b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
-
-		} else {
-			log.Printf("Sending response to %d", b.chatID)
-			b.EditMessageText("Elaborating response...", initialMessageID, nil)
-
-			if replyWithVoice {
-				b.EditMessageText("Obtaining audio...", initialMessageID, nil)
-
-				audioLocation, ttsErr := elevenlabs.TextToSpeech(response)
-				if ttsErr != nil {
-					errorMessage := fmt.Errorf("error generating speech from text: %s", ttsErr)
-					log.Println(errorMessage)
-					b.EditMessageText(response+"\n\n"+errorMessage.Error(), initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-				} else {
-					log.Printf("Sending audio to %d", b.chatID)
-
-					_, err = b.SendVoice(echotron.NewInputFilePath(audioLocation), b.chatID, &echotron.VoiceOptions{ParseMode: echotron.Markdown, Caption: response})
-					if err != nil {
-						errorMessage := fmt.Errorf("error sending audio to %d: %s", b.chatID, err)
-						log.Println(errorMessage)
-						b.EditMessageText(response+"\n\n"+"error sending audio response", initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-					} else {
-						b.DeleteMessage(b.chatID, initialMessage.Result.ID)
-					}
-				}
-			} else {
-				b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
-			}
-			selectedConversation.AppendMessage(response, selectedConversation.AssistantRole)
-
-		}
+		b.handleCommunication(user, msg, update)
 	}
 	b.saveUsers("users.json")
 
+}
+
+func (b *bot) handleCommunication(user *session.User, msg string, update *echotron.Update) {
+	selectedConversation := user.Conversations[user.SelectedConversation]
+
+	initialMessage, err := b.SendMessage("Analizing message...", b.chatID, nil)
+	if err != nil {
+		log.Printf("Error sending initial message to %d: %s", b.chatID, err)
+		return
+	}
+
+	initialMessageID := echotron.NewMessageID(b.chatID, initialMessage.Result.ID)
+
+	if update.Message != nil && update.Message.Voice != nil {
+		var err error
+		replyWithVoice = true
+		log.Printf("Transcribing %d's message", b.chatID)
+		b.EditMessageText("Transcribing message...", initialMessageID, nil)
+
+		if msg, err = b.transcript(update.Message.Voice.FileID); err != nil {
+			errorMessage := fmt.Errorf("error transcribing message: %s", err)
+			log.Println(errorMessage)
+			b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
+		}
+	}
+
+	log.Printf("Sending %d's message to ChatGPT", b.chatID)
+	_, err = b.EditMessageText("Sending message to ChatGPT...", initialMessageID, nil)
+
+	if err != nil {
+		log.Printf("Error editing message %d: %s", b.chatID, err)
+		return
+	}
+
+	selectedConversation.AppendMessage(msg, selectedConversation.UserRole)
+
+	if selectedConversation.Title == "" {
+		selectedConversation.Title, _ = gpt.SendMessagesToChatGPT(*gpt.GetTitle(defaultGptEngine, msg))
+	}
+
+	response, err := gpt.SendMessagesToChatGPT(*selectedConversation.Content)
+
+	if err != nil {
+		errorMessage := fmt.Errorf("error contacting ChatGPT: %s", err)
+		log.Println(errorMessage)
+		b.EditMessageText(errorMessage.Error(), initialMessageID, nil)
+
+	} else {
+		log.Printf("Sending response to %d", b.chatID)
+		b.EditMessageText("Elaborating response...", initialMessageID, nil)
+
+		if replyWithVoice {
+			b.EditMessageText("Obtaining audio...", initialMessageID, nil)
+
+			audioLocation, ttsErr := elevenlabs.TextToSpeech(response)
+			if ttsErr != nil {
+				errorMessage := fmt.Errorf("error generating speech from text: %s", ttsErr)
+				log.Println(errorMessage)
+				b.EditMessageText(response+"\n\n"+errorMessage.Error(), initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+			} else {
+				log.Printf("Sending audio to %d", b.chatID)
+
+				_, err = b.SendVoice(echotron.NewInputFilePath(audioLocation), b.chatID, &echotron.VoiceOptions{ParseMode: echotron.Markdown, Caption: response})
+				if err != nil {
+					errorMessage := fmt.Errorf("error sending audio to %d: %s", b.chatID, err)
+					log.Println(errorMessage)
+					b.EditMessageText(response+"\n\n"+"error sending audio response", initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+				} else {
+					b.DeleteMessage(b.chatID, initialMessage.Result.ID)
+				}
+			}
+		} else {
+			b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
+		}
+		selectedConversation.AppendMessage(response, selectedConversation.AssistantRole)
+
+	}
 }
 
 func message(update *echotron.Update) string {
@@ -395,12 +411,16 @@ func (b *bot) transcript(fileID string) (string, error) {
 	return transcript, nil
 }
 
-func (b *bot) getMenu() *echotron.ReplyKeyboardMarkup {
+func (b *bot) getMainMenu() *echotron.ReplyKeyboardMarkup {
 	return &echotron.ReplyKeyboardMarkup{
 		Keyboard: [][]echotron.KeyboardButton{
 			{
 				{Text: "/list", RequestContact: false, RequestLocation: false},
 				{Text: "/new", RequestContact: false, RequestLocation: false},
+			},
+			{
+				{Text: "/settings", RequestContact: false, RequestLocation: false},
+				{Text: "/stats", RequestContact: false, RequestLocation: false},
 			},
 		},
 		ResizeKeyboard:  true,
@@ -434,11 +454,15 @@ func (b *bot) getListOfChats() *echotron.ReplyKeyboardMarkup {
 	return menu
 }
 
-func (b *bot) getBackButton() *echotron.ReplyKeyboardMarkup {
+func (b *bot) getConversationUI() *echotron.ReplyKeyboardMarkup {
 	menu := &echotron.ReplyKeyboardMarkup{
 		Keyboard: [][]echotron.KeyboardButton{
 			{
 				{Text: "/back", RequestContact: false, RequestLocation: false},
+				{Text: "/stats", RequestContact: false, RequestLocation: false},
+			},
+			{
+				{Text: "/delete", RequestContact: false, RequestLocation: false},
 			},
 		},
 		ResizeKeyboard:  true,

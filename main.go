@@ -114,7 +114,6 @@ func (b *bot) handleUserApproval(msg string, user *session.User) {
 		return
 	}
 	userChatID, _ := strconv.Atoi(slice[1])
-
 	if slice[0] == "/whitelist" {
 		if b.Users[int64(userChatID)].Status == session.Whitelisted {
 			b.SendMessage("User "+slice[1]+" already whitelisted", b.chatID, nil)
@@ -161,8 +160,6 @@ func (b *bot) Update(update *echotron.Update) {
 	user, exists := b.Users[b.chatID]
 	if !exists {
 		b.handleNewUser()
-		return
-
 	} else if !user.IsAdmin {
 		switch user.Status {
 		case session.Unreviewed:

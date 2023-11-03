@@ -6,6 +6,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/alexanderi96/gptron/session"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -19,6 +20,8 @@ var (
 	openaiApiKey string
 
 	client *openai.Client
+
+	DefaultGptEngine = openai.GPT4
 )
 
 func init() {
@@ -33,7 +36,6 @@ func init() {
 func ListAvailableModels() (*openai.EnginesList, error) {
 	engines, err := client.ListEngines(context.Background())
 	if err != nil {
-		log.Print("ListEngines error: ", err)
 		return &openai.EnginesList{}, err
 	}
 	return &engines, nil
@@ -46,18 +48,17 @@ func SendVoiceToWhisper(voicePath string) (string, error) {
 	})
 
 	if err != nil {
-		log.Print("ChatCompletion error: ", err)
 		return "", err
 	}
 
 	return resp.Text, nil
 }
 
-func SendMessagesToChatGPT(ctx openai.ChatCompletionRequest) (string, error) {
-
+func SendMessagesToChatGPT(ctx *session.Conversation) (string, error) {
+	log.Printf("%v", ctx.GetChatCompletionRequest())
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
-		ctx,
+		*ctx.GetChatCompletionRequest(),
 	)
 
 	if err != nil {
@@ -68,15 +69,28 @@ func SendMessagesToChatGPT(ctx openai.ChatCompletionRequest) (string, error) {
 	return resp.Choices[0].Message.Content, nil
 }
 
-func SendTextToChatGPT(message *openai.CompletionRequest) (string, error) {
-	resp, err := client.CreateCompletion(
+func SummarizeChat(conv *session.Conversation, n int) (string, error) {
+	// Assicurati che ci siano abbastanza messaggi nella chat da riassumere
+	if len(conv.Content) < n {
+		log.Print("Not enough messages to summarize, using all messages")
+		n = len(conv.Content)
+	}
+
+	convBk := conv
+	convBk.Content = convBk.Content[len(conv.Content)-n:]
+
+	ctx := convBk.GetChatCompletionRequest()
+
+	// Invia la richiesta
+	resp, err := client.CreateChatCompletion(
 		context.Background(),
-		*message,
+		*SummarizatorPrompt(DefaultGptEngine, &ctx.Messages),
 	)
 
 	if err != nil {
 		log.Print("Completion error: ", err)
 		return "", err
 	}
-	return resp.Choices[0].Text, nil
+
+	return resp.Choices[0].Message.Content, nil
 }

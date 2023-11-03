@@ -15,9 +15,10 @@ const (
 	Whitelisted
 	Blacklisted
 
-	MenuStateMain     = "main"
-	MenuStateList     = "list"
-	MenuStateSelected = "selected"
+	MenuStateMain              = "main"
+	MenuStateList              = "list"
+	MenuStateSelected          = "selected"
+	MenuStateSelectPersonality = "select_personality"
 )
 
 type User struct {
@@ -32,19 +33,28 @@ type User struct {
 }
 
 type Conversation struct {
-	ID            uuid.UUID
-	Title         string
-	Content       *openai.ChatCompletionRequest
-	UserRole      string
-	AssistantRole string
-	CreationTime  time.Time
-	LastUpdate    time.Time
+	ID             uuid.UUID
+	Title          string
+	Content        []*Message
+	UserRole       string
+	AssistantRole  string
+	Model          string
+	GptPersonality string
+	CreationTime   time.Time
+	LastUpdate     time.Time
 }
 
-func (c *Conversation) AppendMessage(message, role string) {
-	c.Content.Messages = append(c.Content.Messages, openai.ChatCompletionMessage{
-		Role:    role,
-		Content: message,
+type Message struct {
+	Role         string
+	Content      string
+	CreationTime time.Time
+}
+
+func (c *Conversation) AppendMessage(text, role string) {
+	c.Content = append(c.Content, &Message{
+		Role:         role,
+		Content:      text,
+		CreationTime: time.Now(),
 	})
 	c.LastUpdate = time.Now()
 }
@@ -52,14 +62,11 @@ func (c *Conversation) AppendMessage(message, role string) {
 func (u *User) CreateNewConversation(engineID, userID string) {
 	convUuid := uuid.New()
 	u.Conversations[convUuid] = &Conversation{
-		ID: convUuid,
-		Content: &openai.ChatCompletionRequest{
-			Model:    engineID,
-			Messages: make([]openai.ChatCompletionMessage, 0),
-			User:     userID,
-		},
+		ID:            convUuid,
+		Content:       make([]*Message, 0),
 		UserRole:      openai.ChatMessageRoleUser,
 		AssistantRole: openai.ChatMessageRoleAssistant,
+		Model:         engineID,
 		CreationTime:  time.Now(),
 		LastUpdate:    time.Now(),
 	}
@@ -81,7 +88,7 @@ func NewUser(admin bool, userID int64) *User {
 func (c *Conversation) TokenCount() (int, int) {
 	inputTokens := 0
 	outputTokens := 0
-	for _, message := range c.Content.Messages {
+	for _, message := range c.Content {
 		tokenCount := len(message.Content) // Semplice conteggio dei token basato sulla lunghezza del messaggio
 		if message.Role == c.UserRole {
 			inputTokens += tokenCount
@@ -112,7 +119,7 @@ func (u *User) GetGlobalStats() string {
 		totalInputTokens += inputTokens
 		totalOutputTokens += outputTokens
 
-		if longestConv == nil || len(longestConv.Content.Messages) < len(conv.Content.Messages) {
+		if longestConv == nil || len(longestConv.Content) < len(conv.Content) {
 			longestConv = conv
 		}
 
@@ -131,4 +138,21 @@ func (u *User) GetGlobalStats() string {
 		stats += fmt.Sprintf("Conversazione più vecchia: %s\n", oldestConv.Title)
 	}
 	return stats
+}
+
+func (c *Conversation) GetChatCompletionRequest() *openai.ChatCompletionRequest {
+	ctx := &openai.ChatCompletionRequest{
+		Model:    c.Model,
+		Messages: []openai.ChatCompletionMessage{},
+	}
+
+	for _, message := range c.Content {
+		ctx.Messages = append(ctx.Messages, openai.ChatCompletionMessage{
+			Role:    message.Role,
+			Content: message.Content,
+		})
+	}
+
+	return ctx
+
 }

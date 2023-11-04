@@ -19,6 +19,7 @@ const (
 	MenuStateList              = "list"
 	MenuStateSelected          = "selected"
 	MenuStateSelectPersonality = "select_personality"
+	MenuStateSelectModel       = "select_model"
 )
 
 type User struct {
@@ -30,6 +31,9 @@ type User struct {
 	MenuState            string    `json:"-"`
 	CreationTime         time.Time
 	LastUpdate           time.Time
+	StrikeCount          int
+	TotalInputTokens     int
+	TotalOutputTokens    int
 }
 
 type Conversation struct {
@@ -42,6 +46,8 @@ type Conversation struct {
 	GptPersonality string
 	CreationTime   time.Time
 	LastUpdate     time.Time
+	InputTokens    int
+	OutputTokens   int
 }
 
 type Message struct {
@@ -59,14 +65,13 @@ func (c *Conversation) AppendMessage(text, role string) {
 	c.LastUpdate = time.Now()
 }
 
-func (u *User) CreateNewConversation(engineID, userID string) {
+func (u *User) CreateNewConversation(userID string) {
 	convUuid := uuid.New()
 	u.Conversations[convUuid] = &Conversation{
 		ID:            convUuid,
 		Content:       make([]*Message, 0),
 		UserRole:      openai.ChatMessageRoleUser,
 		AssistantRole: openai.ChatMessageRoleAssistant,
-		Model:         engineID,
 		CreationTime:  time.Now(),
 		LastUpdate:    time.Now(),
 	}
@@ -74,14 +79,19 @@ func (u *User) CreateNewConversation(engineID, userID string) {
 }
 
 func NewUser(admin bool, userID int64) *User {
+	status := Unreviewed
+	if admin {
+		status = Whitelisted
+	}
 	return &User{
 		ChatID:               userID,
-		Status:               Unreviewed,
+		Status:               status,
 		IsAdmin:              admin,
 		Conversations:        make(map[uuid.UUID]*Conversation),
 		SelectedConversation: uuid.Nil,
 		CreationTime:         time.Now(),
 		LastUpdate:           time.Now(),
+		StrikeCount:          0,
 	}
 }
 
@@ -104,8 +114,8 @@ func (u *User) GetConversationStats(convID uuid.UUID) string {
 	if !exists {
 		return "Conversazione non trovata."
 	}
-	inputTokens, outputTokens := conv.TokenCount()
-	return fmt.Sprintf("Conversazione: %s\nToken in ingresso: %d\nToken in uscita: %d\n", conv.Title, inputTokens, outputTokens)
+
+	return fmt.Sprintf("Conversazione: %s\nPersonalità: %s\nToken in ingresso: %d\nToken in uscita: %d\n", conv.Title, conv.GptPersonality, conv.InputTokens, conv.OutputTokens)
 }
 
 func (u *User) GetGlobalStats() string {
@@ -115,9 +125,8 @@ func (u *User) GetGlobalStats() string {
 	var oldestConv *Conversation
 
 	for _, conv := range u.Conversations {
-		inputTokens, outputTokens := conv.TokenCount()
-		totalInputTokens += inputTokens
-		totalOutputTokens += outputTokens
+		totalInputTokens += conv.InputTokens
+		totalOutputTokens += conv.OutputTokens
 
 		if longestConv == nil || len(longestConv.Content) < len(conv.Content) {
 			longestConv = conv
@@ -128,7 +137,7 @@ func (u *User) GetGlobalStats() string {
 		}
 	}
 
-	stats := fmt.Sprintf("Statistiche Globali:\n")
+	stats := "Statistiche Globali:\n"
 	stats += fmt.Sprintf("Token totali in ingresso: %d\n", totalInputTokens)
 	stats += fmt.Sprintf("Token totali in uscita: %d\n", totalOutputTokens)
 	if longestConv != nil {

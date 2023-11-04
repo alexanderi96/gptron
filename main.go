@@ -35,13 +35,13 @@ var (
 	dsp *echotron.Dispatcher
 
 	commands = []echotron.BotCommand{
-		{Command: "/start", Description: "start bot"},
-		{Command: "/list", Description: "show all conversations"},
-		{Command: "/select", Description: "select conversation"},
-		{Command: "/ping", Description: "check bot status"},
-		{Command: "/help", Description: "help"},
-		{Command: "/whitelist", Description: "whitelist user"},
-		{Command: "/blacklist", Description: "blacklist user"},
+		// {Command: "/start", Description: "start bot"},
+		// {Command: "/list", Description: "show all conversations"},
+		// {Command: "/select", Description: "select conversation"},
+		// {Command: "/ping", Description: "check bot status"},
+		// {Command: "/help", Description: "help"},
+		// {Command: "/whitelist", Description: "whitelist user"},
+		// {Command: "/blacklist", Description: "blacklist user"},
 	}
 
 	replyWithVoice = false
@@ -57,7 +57,7 @@ func init() {
 	}
 
 	dsp = echotron.NewDispatcher(telegramToken, newBot)
-	//go setCommands()
+	go setCommands()
 
 }
 
@@ -93,13 +93,16 @@ func main() {
 	}
 }
 
-func (b *bot) handleNewUser() {
-	user := session.NewUser(strconv.Itoa(int(b.chatID)) == admin, b.chatID)
+func (b *bot) handleNewUser() *session.User {
+	b.Users[b.chatID] = session.NewUser(strconv.Itoa(int(b.chatID)) == admin, b.chatID)
 
-	b.Users[b.chatID] = user
-	b.notifyAdmin(b.chatID)
-
-	b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
+	if !b.Users[b.chatID].IsAdmin {
+		b.notifyAdmin(b.chatID)
+		b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
+	} else {
+		b.SendMessage("Welcome back master", b.chatID, nil)
+	}
+	return b.Users[b.chatID]
 }
 
 func (b *bot) handleUserApproval(msg string, user *session.User) {
@@ -153,13 +156,13 @@ func (b *bot) handleSelect(msg string) {
 	b.Users[b.chatID].SelectedConversation = argID
 }
 func (b *bot) Update(update *echotron.Update) {
-	log.Printf("New command from " + strconv.FormatInt(b.chatID, 10))
+	baseLogCommand := "New %s command from " + strconv.FormatInt(b.chatID, 10)
 
 	msg := message(update)
 
 	user, exists := b.Users[b.chatID]
 	if !exists {
-		b.handleNewUser()
+		user = b.handleNewUser()
 	} else if !user.IsAdmin {
 		switch user.Status {
 		case session.Unreviewed:
@@ -182,12 +185,22 @@ func (b *bot) Update(update *echotron.Update) {
 
 	switch {
 	case strings.HasPrefix(msg, "/ping"):
+		log.Printf(baseLogCommand, msg)
 		b.SendMessage("pong", b.chatID, nil)
+		msg = ""
 
 	case strings.HasPrefix(msg, "/whitelist"), strings.HasPrefix(msg, "/blacklist"):
+		log.Printf(baseLogCommand, msg)
 		b.handleUserApproval(msg, user)
+		msg = ""
 
 	case strings.HasPrefix(msg, "/list"):
+		log.Printf(baseLogCommand, msg)
+		if len(user.Conversations) <= 0 {
+			b.SendMessage("No conversations found, start a new one", b.chatID, nil)
+			return
+		}
+
 		user.MenuState = session.MenuStateList
 		b.SendMessage(
 			"Select a conversation from the list or start a new one",
@@ -197,11 +210,15 @@ func (b *bot) Update(update *echotron.Update) {
 				ParseMode:   echotron.Markdown,
 			},
 		)
+		msg = ""
 
 	case strings.HasPrefix(msg, "/select"):
+		log.Printf(baseLogCommand, msg)
 		b.handleSelect(msg)
+		msg = ""
 
 	case strings.HasPrefix(msg, "/back"):
+		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelected {
 			user.MenuState = session.MenuStateList
 			b.SendMessage("Select a conversation from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
@@ -209,29 +226,31 @@ func (b *bot) Update(update *echotron.Update) {
 			user.MenuState = session.MenuStateMain
 			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
 		}
+		msg = ""
 
 	case strings.HasPrefix(msg, "/home"):
+		log.Printf(baseLogCommand, msg)
 		user.MenuState = session.MenuStateMain
 		b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
+		msg = ""
 
 	case strings.HasPrefix(msg, "/new"):
-
-		user.CreateNewConversation(gpt.DefaultGptEngine, strconv.Itoa(int(b.chatID)))
+		log.Printf(baseLogCommand, msg)
+		user.CreateNewConversation(strconv.Itoa(int(b.chatID)))
 		user.MenuState = session.MenuStateSelected
-
-		if user.Conversations[user.SelectedConversation].GptPersonality == "" {
-			user.MenuState = session.MenuStateSelectPersonality
-			b.SendMessage("Select a personality from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getPersonalityList(), ParseMode: echotron.Markdown})
-		}
+		msg = ""
 
 	case strings.HasPrefix(msg, "/stats"):
+		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateMain {
 			b.SendMessage(user.GetGlobalStats(), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
 		} else if user.MenuState == session.MenuStateSelected {
 			b.SendMessage(user.GetConversationStats(user.SelectedConversation), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
 		}
+		msg = ""
 
 	case strings.HasPrefix(msg, "/summarize"):
+		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelected {
 			rsp, err := gpt.SummarizeChat(user.Conversations[user.SelectedConversation], 10)
 			if err != nil {
@@ -240,8 +259,10 @@ func (b *bot) Update(update *echotron.Update) {
 				b.SendMessage(rsp, b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
 			}
 		}
+		msg = ""
 
 	case strings.HasPrefix(msg, "/ask"):
+		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelectPersonality {
 			slice := strings.Split(msg, " ")
 
@@ -265,8 +286,40 @@ func (b *bot) Update(update *echotron.Update) {
 			}
 
 		}
+		msg = ""
+
+	case strings.HasPrefix(msg, "/model"):
+		log.Printf(baseLogCommand, msg)
+		if user.MenuState == session.MenuStateSelectModel {
+			slice := strings.Split(msg, " ")
+
+			if len(slice) != 2 {
+				log.Printf("User %d sent an invalid input: %s", b.chatID, msg)
+				b.SendMessage("Invalid input", b.chatID, nil)
+				return
+			}
+
+			models, err := gpt.ListAvailableModels()
+			if err != nil {
+				log.Printf("User %d sent an invalid input: %s", b.chatID, msg)
+				b.SendMessage(err.Error(), b.chatID, nil)
+				return
+			}
+
+			for _, model := range models.Engines {
+				if model.ID == slice[1] {
+					user.Conversations[user.SelectedConversation].Model = slice[1]
+					log.Printf("User %d selected model %s for conversation %s", b.chatID, user.Conversations[user.SelectedConversation].Model, user.SelectedConversation)
+					b.SendMessage("Selected model "+slice[1], b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI(), ParseMode: echotron.Markdown})
+					user.MenuState = session.MenuStateSelected
+				}
+			}
+
+		}
+		msg = ""
 
 	case strings.HasPrefix(msg, "/delete"):
+		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelected && user.SelectedConversation != uuid.Nil {
 			convID := user.SelectedConversation
 
@@ -283,21 +336,31 @@ func (b *bot) Update(update *echotron.Update) {
 			b.SendMessage("Conversation "+convID.String()+" has been deleted", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
 
 		}
+		msg = ""
 
 	default:
-		if user.MenuState != session.MenuStateSelected {
-			b.SendMessage("Select a conversation from the list or start a new one", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu()})
+	}
+
+	if user.MenuState == session.MenuStateSelected {
+		if user.Conversations[user.SelectedConversation].Model == "" {
+			user.MenuState = session.MenuStateSelectModel
+			b.SendMessage("Select a model from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getModelList(), ParseMode: echotron.Markdown})
 			return
-		}
-		if user.Conversations[user.SelectedConversation].GptPersonality == "" {
+		} else if user.Conversations[user.SelectedConversation].GptPersonality == "" {
 			user.MenuState = session.MenuStateSelectPersonality
 			b.SendMessage("Select a personality from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getPersonalityList(), ParseMode: echotron.Markdown})
 			return
 		}
 
-		b.handleCommunication(user, msg, update)
-		b.Users[b.chatID] = user
+		if msg != "" {
+			log.Println("User " + strconv.FormatInt(b.chatID, 10) + " talking in conversation " + user.SelectedConversation.String())
+			b.handleCommunication(user, msg, update)
+			b.Users[b.chatID] = user
+
+		}
 	}
+
+	log.Println("Saving users")
 	b.saveUsers("users.json")
 
 }
@@ -331,17 +394,20 @@ func (b *bot) handleCommunication(user *session.User, msg string, update *echotr
 
 	selectedConversation.AppendMessage(msg, selectedConversation.UserRole)
 
-	if selectedConversation.Title == "" {
-		selectedConversation.Title, _ = gpt.SendMessagesToChatGPT(gpt.GetTitle(gpt.DefaultGptEngine, msg))
-	}
-
-	response, err := gpt.SendMessagesToChatGPT(selectedConversation)
+	respObj, err := gpt.SendMessagesToChatGPT(selectedConversation)
 
 	if err != nil {
 		log.Printf("Error contacting ChatGPT from user %d at conversation %s:\n%s", b.chatID, user.SelectedConversation, err)
 		b.EditMessageText("error contacting ChatGPT:\n%s"+err.Error(), initialMessageID, nil)
-
 	} else {
+		user.TotalInputTokens += int(respObj.Usage.PromptTokens)
+		user.TotalOutputTokens += int(respObj.Usage.CompletionTokens)
+
+		user.Conversations[user.SelectedConversation].InputTokens = int(respObj.Usage.PromptTokens)
+		user.Conversations[user.SelectedConversation].OutputTokens = int(respObj.Usage.CompletionTokens)
+
+		response := respObj.Message.Content
+
 		log.Printf("Sending response to user %d for conversation %s", b.chatID, user.SelectedConversation)
 		b.EditMessageText("Elaborating response...", initialMessageID, nil)
 
@@ -370,6 +436,15 @@ func (b *bot) handleCommunication(user *session.User, msg string, update *echotr
 		}
 		selectedConversation.AppendMessage(response, selectedConversation.AssistantRole)
 
+		if selectedConversation.Title == "" {
+			respObj, err = gpt.SendMessagesToChatGPT(gpt.GetTitleContext(gpt.DefaultGptEngine, selectedConversation.Content))
+			if err != nil {
+				log.Printf("Error generating title for conversation %s: %s", user.SelectedConversation, err)
+				selectedConversation.Title = "New Chat with " + user.Conversations[user.SelectedConversation].GptPersonality
+			} else {
+				selectedConversation.Title = respObj.Message.Content
+			}
+		}
 	}
 }
 
@@ -544,8 +619,33 @@ func (b *bot) getPersonalityList() *echotron.ReplyKeyboardMarkup {
 		Selective:       false,
 	}
 
-	for key, _ := range gpt.Personalities {
+	for key := range gpt.Personalities {
 		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/ask " + key}})
+	}
+
+	return menu
+}
+
+func (b *bot) getModelList() *echotron.ReplyKeyboardMarkup {
+	menu := &echotron.ReplyKeyboardMarkup{
+		Keyboard: [][]echotron.KeyboardButton{
+			{
+				{Text: "/back", RequestContact: false, RequestLocation: false},
+			},
+		},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: false,
+		Selective:       false,
+	}
+
+	models, err := gpt.ListAvailableModels()
+	if err == nil {
+		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model gpt-3.5-turbo"}})
+		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model gpt-4"}})
+	} else {
+		for _, model := range models.Engines {
+			menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model " + model.ID}})
+		}
 	}
 
 	return menu

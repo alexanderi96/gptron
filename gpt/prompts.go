@@ -42,20 +42,26 @@ func NewChat(engineID string) *openai.ChatCompletionRequest {
 	}
 }
 
-func GetTitle(engineID, msg string) *session.Conversation {
-	return &session.Conversation{
+func GetTitleContext(engineID string, messages []*session.Message) *session.Conversation {
+	ctx := &session.Conversation{
 		Model: engineID,
 		Content: []*session.Message{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: "Craft a max 10 word title for the following message:\n\n" + msg,
+				Content: Personalities["TitleGenerator"],
 			},
 		},
 	}
+	for _, message := range messages {
+		if message.Role != openai.ChatMessageRoleSystem {
+			ctx.Content = append(ctx.Content, message)
+		}
+	}
+	return ctx
 }
 
 func SummarizatorPrompt(engineID string, msg *[]openai.ChatCompletionMessage) *openai.ChatCompletionRequest {
-	pers, _ := GetPersonalityWithCommonPrompts("Summarizer")
+	pers, _ := GetPersonalityWithCommonPrompts("ConversationalSynthesizer")
 
 	messages := []openai.ChatCompletionMessage{
 		{

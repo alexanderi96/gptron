@@ -10,9 +10,9 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-type Model struct {
-	EngineID string
-	// parameters in order to keep track of the costs
+type GptResponse struct {
+	Message openai.ChatCompletionMessage
+	Usage   openai.Usage
 }
 
 var (
@@ -54,8 +54,7 @@ func SendVoiceToWhisper(voicePath string) (string, error) {
 	return resp.Text, nil
 }
 
-func SendMessagesToChatGPT(ctx *session.Conversation) (string, error) {
-	log.Printf("%v", ctx.GetChatCompletionRequest())
+func SendMessagesToChatGPT(ctx *session.Conversation) (*GptResponse, error) {
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		*ctx.GetChatCompletionRequest(),
@@ -63,10 +62,10 @@ func SendMessagesToChatGPT(ctx *session.Conversation) (string, error) {
 
 	if err != nil {
 		log.Print("ChatCompletion error: ", err)
-		return "", err
+		return nil, err
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	return &GptResponse{resp.Choices[0].Message, resp.Usage}, nil
 }
 
 func SummarizeChat(conv *session.Conversation, n int) (string, error) {

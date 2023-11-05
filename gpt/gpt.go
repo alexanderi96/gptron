@@ -6,7 +6,6 @@ import (
 	"context"
 	"log"
 
-	"github.com/alexanderi96/gptron/session"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -54,10 +53,10 @@ func SendVoiceToWhisper(voicePath string) (string, error) {
 	return resp.Text, nil
 }
 
-func SendMessagesToChatGPT(ctx *session.Conversation) (*GptResponse, error) {
+func SendMessagesToChatGPT(ctx *openai.ChatCompletionRequest) (*GptResponse, error) {
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
-		*ctx.GetChatCompletionRequest(),
+		*ctx,
 	)
 
 	if err != nil {
@@ -66,30 +65,4 @@ func SendMessagesToChatGPT(ctx *session.Conversation) (*GptResponse, error) {
 	}
 
 	return &GptResponse{resp.Choices[0].Message, resp.Usage}, nil
-}
-
-func SummarizeChat(conv *session.Conversation, n int) (string, error) {
-	// Assicurati che ci siano abbastanza messaggi nella chat da riassumere
-	if len(conv.Content) < n {
-		log.Print("Not enough messages to summarize, using all messages")
-		n = len(conv.Content)
-	}
-
-	convBk := conv
-	convBk.Content = convBk.Content[len(conv.Content)-n:]
-
-	ctx := convBk.GetChatCompletionRequest()
-
-	// Invia la richiesta
-	resp, err := client.CreateChatCompletion(
-		context.Background(),
-		*SummarizatorPrompt(DefaultGptEngine, &ctx.Messages),
-	)
-
-	if err != nil {
-		log.Print("Completion error: ", err)
-		return "", err
-	}
-
-	return resp.Choices[0].Message.Content, nil
 }

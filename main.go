@@ -96,7 +96,7 @@ func main() {
 func (b *bot) handleNewUser() *session.User {
 	b.Users[b.chatID] = session.NewUser(strconv.Itoa(int(b.chatID)) == admin, b.chatID)
 
-	if !b.Users[b.chatID].IsAdmin {
+	if !b.Users[b.chatID].IsAdmin() {
 		b.notifyAdmin(b.chatID)
 		b.SendMessage("Your request to be whitelisted has been received, please wait for an admin to review it", b.chatID, nil)
 	} else {
@@ -106,7 +106,7 @@ func (b *bot) handleNewUser() *session.User {
 }
 
 func (b *bot) handleUserApproval(msg string, user *session.User) {
-	if !user.IsAdmin {
+	if !user.IsAdmin() {
 		b.SendMessage("Only admins can use this command", b.chatID, nil)
 		return
 	}
@@ -149,9 +149,10 @@ func (b *bot) handleSelect(msg string) {
 		return
 	}
 	b.Users[b.chatID].MenuState = session.MenuStateSelected
+	_, markup := b.Users[b.chatID].GetMenu()
 
 	log.Printf("User %d selected conversation %s", b.chatID, argID.String())
-	b.SendMessage("Switched to conversation "+argID.String(), b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI(), ParseMode: echotron.Markdown})
+	b.SendMessage("Switched to conversation "+argID.String(), b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
 
 	b.Users[b.chatID].SelectedConversation = argID
 }
@@ -163,23 +164,17 @@ func (b *bot) Update(update *echotron.Update) {
 	user, exists := b.Users[b.chatID]
 	if !exists {
 		user = b.handleNewUser()
-	} else if !user.IsAdmin {
-		switch user.Status {
-		case session.Unreviewed:
-			b.SendMessage("👀", b.chatID, nil)
-			return
-
-		case session.Blacklisted:
-			b.SendMessage("💀", b.chatID, nil)
-			return
-
-		case session.Whitelisted:
-		default:
-		}
 	}
 
-	user.LastUpdate = time.Now()
-	if user.MenuState == "" {
+	if user.Status == session.Unreviewed {
+		log.Println(baseLogCommand + ". (Not reviewed)")
+		b.SendMessage("👀", b.chatID, nil)
+		return
+	} else if user.Status == session.Blacklisted {
+		log.Println(baseLogCommand + ". (Blacklisted)")
+		b.SendMessage("💀", b.chatID, nil)
+		return
+	} else if user.MenuState == "" {
 		user.MenuState = session.MenuStateMain
 	}
 
@@ -187,12 +182,12 @@ func (b *bot) Update(update *echotron.Update) {
 	case strings.HasPrefix(msg, "/ping"):
 		log.Printf(baseLogCommand, msg)
 		b.SendMessage("pong", b.chatID, nil)
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/whitelist"), strings.HasPrefix(msg, "/blacklist"):
 		log.Printf(baseLogCommand, msg)
 		b.handleUserApproval(msg, user)
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/list"):
 		log.Printf(baseLogCommand, msg)
@@ -202,43 +197,54 @@ func (b *bot) Update(update *echotron.Update) {
 		}
 
 		user.MenuState = session.MenuStateList
+		_, markup := user.GetMenu()
 		b.SendMessage(
 			"Select a conversation from the list or start a new one",
 			b.chatID,
 			&echotron.MessageOptions{
-				ReplyMarkup: b.getListOfChats(),
+				ReplyMarkup: markup,
 				ParseMode:   echotron.Markdown,
 			},
 		)
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/select"):
 		log.Printf(baseLogCommand, msg)
+		if user.HasReachedUsageLimit() {
+			b.SendMessage("You have reached your usage limit", b.chatID, nil)
+			return
+		}
 		b.handleSelect(msg)
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/back"):
 		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelected {
 			user.MenuState = session.MenuStateList
-			b.SendMessage("Select a conversation from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getListOfChats(), ParseMode: echotron.Markdown})
 		} else {
 			user.MenuState = session.MenuStateMain
-			b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
 		}
-		msg = ""
+		message, markup := user.GetMenu()
+
+		b.SendMessage(message, b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
+
+		return
 
 	case strings.HasPrefix(msg, "/home"):
 		log.Printf(baseLogCommand, msg)
 		user.MenuState = session.MenuStateMain
-		b.SendMessage("Main menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
-		msg = ""
+		message, markup := user.GetMenu()
+		b.SendMessage(message, b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
+		return
 
 	case strings.HasPrefix(msg, "/new"):
 		log.Printf(baseLogCommand, msg)
-		user.CreateNewConversation(strconv.Itoa(int(b.chatID)))
+		if user.HasReachedUsageLimit() {
+			b.SendMessage("You have reached your usage limit", b.chatID, nil)
+			return
+		}
+		user.SelectedConversation = user.NewConversation()
 		user.MenuState = session.MenuStateSelected
-		msg = ""
 
 	case strings.HasPrefix(msg, "/stats"):
 		log.Printf(baseLogCommand, msg)
@@ -247,19 +253,19 @@ func (b *bot) Update(update *echotron.Update) {
 		} else if user.MenuState == session.MenuStateSelected {
 			b.SendMessage(user.GetConversationStats(user.SelectedConversation), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
 		}
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/summarize"):
 		log.Printf(baseLogCommand, msg)
 		if user.MenuState == session.MenuStateSelected {
-			rsp, err := gpt.SummarizeChat(user.Conversations[user.SelectedConversation], 10)
+			rsp, err := user.Conversations[user.SelectedConversation].Summarize(10)
 			if err != nil {
 				b.SendMessage(err.Error(), b.chatID, nil)
 			} else {
 				b.SendMessage(rsp, b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
 			}
 		}
-		msg = ""
+		return
 
 	case strings.HasPrefix(msg, "/ask"):
 		log.Printf(baseLogCommand, msg)
@@ -281,12 +287,15 @@ func (b *bot) Update(update *echotron.Update) {
 				pers, _ := gpt.GetPersonalityWithCommonPrompts(slice[1])
 				user.Conversations[user.SelectedConversation].AppendMessage(pers, openai.ChatMessageRoleSystem)
 				log.Printf("User %d selected personality %s for conversation %s", b.chatID, user.Conversations[user.SelectedConversation].GptPersonality, user.SelectedConversation)
-				b.SendMessage("Selected personality "+slice[1]+"\nYou may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI(), ParseMode: echotron.Markdown})
+
 				user.MenuState = session.MenuStateSelected
+				_, markup := user.GetMenu()
+
+				b.SendMessage("Selected personality "+slice[1]+"\nYou may now start talking with ChatGPT.", b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
+				return
 			}
 
 		}
-		msg = ""
 
 	case strings.HasPrefix(msg, "/model"):
 		log.Printf(baseLogCommand, msg)
@@ -299,24 +308,20 @@ func (b *bot) Update(update *echotron.Update) {
 				return
 			}
 
-			models, err := gpt.ListAvailableModels()
-			if err != nil {
-				log.Printf("User %d sent an invalid input: %s", b.chatID, msg)
-				b.SendMessage(err.Error(), b.chatID, nil)
-				return
-			}
+			for _, model := range gpt.Models {
+				if model.Name == slice[1] {
+					user.Conversations[user.SelectedConversation].Model = gpt.Models[slice[1]]
+					log.Printf("User %d selected model %s for conversation %s", b.chatID, user.Conversations[user.SelectedConversation].Model.Name, user.SelectedConversation)
 
-			for _, model := range models.Engines {
-				if model.ID == slice[1] {
-					user.Conversations[user.SelectedConversation].Model = slice[1]
-					log.Printf("User %d selected model %s for conversation %s", b.chatID, user.Conversations[user.SelectedConversation].Model, user.SelectedConversation)
-					b.SendMessage("Selected model "+slice[1], b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getConversationUI(), ParseMode: echotron.Markdown})
 					user.MenuState = session.MenuStateSelected
+					_, markup := user.GetMenu()
+
+					b.SendMessage("Selected model "+slice[1], b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
+
 				}
 			}
-
+			log.Printf("User %d asked a not existing model: %s", b.chatID, msg)
 		}
-		msg = ""
 
 	case strings.HasPrefix(msg, "/delete"):
 		log.Printf(baseLogCommand, msg)
@@ -327,28 +332,46 @@ func (b *bot) Update(update *echotron.Update) {
 				b.SendMessage("Conversation "+convID.String()+" not found", b.chatID, nil)
 				return
 			}
-			user.MenuState = session.MenuStateMain
 
-			delete(user.Conversations, convID)
-			user.SelectedConversation = uuid.Nil
+			user.Conversations[convID].Delete()
+
+			user.MenuState = session.MenuStateMain
+			_, markup := user.GetMenu()
 
 			log.Printf("User %d deleted conversation: %s", b.chatID, convID)
-			b.SendMessage("Conversation "+convID.String()+" has been deleted", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getMainMenu(), ParseMode: echotron.Markdown})
+			b.SendMessage("Conversation "+convID.String()+" has been deleted\nGoing back to the Main Menu", b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
 
 		}
-		msg = ""
+
+	case strings.HasPrefix(msg, "/users_list"):
+		if user.IsAdmin() {
+			b.SendMessage(b.getUsersList(), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
+		}
+
+	case strings.HasPrefix(msg, "/global_stats"):
+		if user.IsAdmin() {
+			b.SendMessage(b.getGlobalStats(), b.chatID, &echotron.MessageOptions{ParseMode: echotron.Markdown})
+		}
 
 	default:
+		if user.MenuState != session.MenuStateSelected {
+			_, markup := user.GetMenu()
+			b.SendMessage("Select an action from the available ones", b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
+			return
+		}
+
 	}
 
 	if user.MenuState == session.MenuStateSelected {
-		if user.Conversations[user.SelectedConversation].Model == "" {
+		if user.Conversations[user.SelectedConversation].Model.Name == "" {
 			user.MenuState = session.MenuStateSelectModel
-			b.SendMessage("Select a model from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getModelList(), ParseMode: echotron.Markdown})
+			message, markup := user.GetMenu()
+			b.SendMessage(message, b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
 			return
 		} else if user.Conversations[user.SelectedConversation].GptPersonality == "" {
 			user.MenuState = session.MenuStateSelectPersonality
-			b.SendMessage("Select a personality from the list", b.chatID, &echotron.MessageOptions{ReplyMarkup: b.getPersonalityList(), ParseMode: echotron.Markdown})
+			message, markup := user.GetMenu()
+			b.SendMessage(message, b.chatID, &echotron.MessageOptions{ReplyMarkup: markup, ParseMode: echotron.Markdown})
 			return
 		}
 
@@ -365,8 +388,77 @@ func (b *bot) Update(update *echotron.Update) {
 
 }
 
+func (b *bot) getUsersList() string {
+	if b.Users == nil {
+		return "No users found"
+	}
+	report := "Users list:\n\n"
+
+	for _, u := range b.Users {
+
+		tokens := u.GetTotalTokens()
+		cost := u.GetTotalCost()
+
+		report += fmt.Sprintf("User: %d, Status:%s\nTokens: %d\n Cost: $%f\n\n", u.ChatID, u.Status, tokens.PromptTokens+tokens.CompletionTokens, cost.Completion+cost.Prompt)
+	}
+
+	return report
+}
+
+func (b *bot) getGlobalStats() string {
+	if b.Users == nil {
+		return "No users found"
+	}
+
+	totalInputTokens := 0
+	totalOutputTokens := 0
+
+	totalUnreviewedUsers := 0
+	totalWhitelistedUsers := 0
+	totalBlacklistedUsers := 0
+	totalAdmins := 0
+
+	totalInputCosts := float32(0.0)
+	totalOutputCosts := float32(0.0)
+
+	report := "Global stats:\n\n"
+
+	report += fmt.Sprintf("Total users: %d\n", len(b.Users))
+
+	for _, u := range b.Users {
+		if u.Status == session.Unreviewed {
+			totalUnreviewedUsers++
+		} else if u.Status == session.Whitelisted {
+			totalWhitelistedUsers++
+		} else if u.Status == session.Blacklisted {
+			totalBlacklistedUsers++
+		} else if u.IsAdmin() {
+			totalAdmins++
+		}
+
+		tokens := u.GetTotalTokens()
+		cost := u.GetTotalCost()
+
+		totalInputTokens += tokens.PromptTokens
+		totalOutputTokens += tokens.CompletionTokens
+		totalInputCosts += cost.Prompt
+		totalOutputCosts += cost.Completion
+	}
+
+	report += fmt.Sprintf("Total input tokens: %d\n", totalInputTokens)
+	report += fmt.Sprintf("Total output tokens: %d\n", totalOutputTokens)
+	report += fmt.Sprintf("Total tokens: %d\n", totalInputTokens+totalOutputTokens)
+	report += "\n"
+
+	report += fmt.Sprintf("Total input costs: $%f\n", totalInputCosts)
+	report += fmt.Sprintf("Total output costs: $%f\n", totalOutputCosts)
+	report += fmt.Sprintf("Total costs: $%f\n", totalInputCosts+totalOutputCosts)
+	report += "\n"
+
+	return report
+}
+
 func (b *bot) handleCommunication(user *session.User, msg string, update *echotron.Update) {
-	selectedConversation := user.Conversations[user.SelectedConversation]
 
 	initialMessage, err := b.SendMessage("Analizing message...", b.chatID, nil)
 	if err != nil {
@@ -392,22 +484,12 @@ func (b *bot) handleCommunication(user *session.User, msg string, update *echotr
 	log.Printf("Sending %d's message for conversation %s to ChatGPT", b.chatID, user.SelectedConversation)
 	b.EditMessageText("Sending message to ChatGPT...", initialMessageID, nil)
 
-	selectedConversation.AppendMessage(msg, selectedConversation.UserRole)
-
-	respObj, err := gpt.SendMessagesToChatGPT(selectedConversation)
+	response, err := user.SendMessagesToChatGPT(msg)
 
 	if err != nil {
 		log.Printf("Error contacting ChatGPT from user %d at conversation %s:\n%s", b.chatID, user.SelectedConversation, err)
 		b.EditMessageText("error contacting ChatGPT:\n%s"+err.Error(), initialMessageID, nil)
 	} else {
-		user.TotalInputTokens += int(respObj.Usage.PromptTokens)
-		user.TotalOutputTokens += int(respObj.Usage.CompletionTokens)
-
-		user.Conversations[user.SelectedConversation].InputTokens = int(respObj.Usage.PromptTokens)
-		user.Conversations[user.SelectedConversation].OutputTokens = int(respObj.Usage.CompletionTokens)
-
-		response := respObj.Message.Content
-
 		log.Printf("Sending response to user %d for conversation %s", b.chatID, user.SelectedConversation)
 		b.EditMessageText("Elaborating response...", initialMessageID, nil)
 
@@ -434,17 +516,7 @@ func (b *bot) handleCommunication(user *session.User, msg string, update *echotr
 		} else {
 			b.EditMessageText(response, initialMessageID, &echotron.MessageTextOptions{ParseMode: echotron.Markdown})
 		}
-		selectedConversation.AppendMessage(response, selectedConversation.AssistantRole)
 
-		if selectedConversation.Title == "" {
-			respObj, err = gpt.SendMessagesToChatGPT(gpt.GetTitleContext(gpt.DefaultGptEngine, selectedConversation.Content))
-			if err != nil {
-				log.Printf("Error generating title for conversation %s: %s", user.SelectedConversation, err)
-				selectedConversation.Title = "New Chat with " + user.Conversations[user.SelectedConversation].GptPersonality
-			} else {
-				selectedConversation.Title = respObj.Message.Content
-			}
-		}
 	}
 }
 
@@ -542,111 +614,4 @@ func (b *bot) transcript(fileID string) (string, error) {
 		return "", fmt.Errorf("error sending voice to Whisper: %s", err)
 	}
 	return transcript, nil
-}
-
-func (b *bot) getMainMenu() *echotron.ReplyKeyboardMarkup {
-	return &echotron.ReplyKeyboardMarkup{
-		Keyboard: [][]echotron.KeyboardButton{
-			{
-				{Text: "/list", RequestContact: false, RequestLocation: false},
-				{Text: "/new", RequestContact: false, RequestLocation: false},
-			},
-			{
-				{Text: "/settings", RequestContact: false, RequestLocation: false},
-				{Text: "/stats", RequestContact: false, RequestLocation: false},
-			},
-		},
-		ResizeKeyboard:  true,
-		OneTimeKeyboard: false,
-		Selective:       false,
-	}
-}
-
-func (b *bot) getListOfChats() *echotron.ReplyKeyboardMarkup {
-	menu := &echotron.ReplyKeyboardMarkup{
-		Keyboard: [][]echotron.KeyboardButton{
-			{
-				{Text: "/back", RequestContact: false, RequestLocation: false},
-			},
-		},
-		ResizeKeyboard:  true,
-		OneTimeKeyboard: false,
-		Selective:       false,
-	}
-
-	for _, conv := range b.Users[b.chatID].Conversations {
-		command := "/select "
-		if conv.Title == "" {
-			command += conv.ID.String()
-		} else {
-			command += conv.Title + " " + conv.ID.String()
-		}
-		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: command}})
-	}
-
-	return menu
-}
-
-func (b *bot) getConversationUI() *echotron.ReplyKeyboardMarkup {
-	menu := &echotron.ReplyKeyboardMarkup{
-		Keyboard: [][]echotron.KeyboardButton{
-			{
-				{Text: "/back", RequestContact: false, RequestLocation: false},
-				{Text: "/stats", RequestContact: false, RequestLocation: false},
-			},
-			{
-				{Text: "/summarize", RequestContact: false, RequestLocation: false},
-				{Text: "/delete", RequestContact: false, RequestLocation: false},
-			},
-		},
-		ResizeKeyboard:  true,
-		OneTimeKeyboard: false,
-		Selective:       false,
-	}
-
-	return menu
-}
-
-func (b *bot) getPersonalityList() *echotron.ReplyKeyboardMarkup {
-	menu := &echotron.ReplyKeyboardMarkup{
-		Keyboard: [][]echotron.KeyboardButton{
-			{
-				{Text: "/back", RequestContact: false, RequestLocation: false},
-			},
-		},
-		ResizeKeyboard:  true,
-		OneTimeKeyboard: false,
-		Selective:       false,
-	}
-
-	for key := range gpt.Personalities {
-		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/ask " + key}})
-	}
-
-	return menu
-}
-
-func (b *bot) getModelList() *echotron.ReplyKeyboardMarkup {
-	menu := &echotron.ReplyKeyboardMarkup{
-		Keyboard: [][]echotron.KeyboardButton{
-			{
-				{Text: "/back", RequestContact: false, RequestLocation: false},
-			},
-		},
-		ResizeKeyboard:  true,
-		OneTimeKeyboard: false,
-		Selective:       false,
-	}
-
-	models, err := gpt.ListAvailableModels()
-	if err == nil {
-		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model gpt-3.5-turbo"}})
-		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model gpt-4"}})
-	} else {
-		for _, model := range models.Engines {
-			menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model " + model.ID}})
-		}
-	}
-
-	return menu
 }

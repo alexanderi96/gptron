@@ -5,3 +5,4 @@ elevenlabs/elevenlabs_api_key
 admin
 telegram_token
 users.json
+*.bk

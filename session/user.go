@@ -60,6 +60,27 @@ type User struct {
 	LastUpdate           time.Time
 	StrikeCount          int
 	UsageMap             map[string]gpt.Model
+	messageChan          chan *msgCtx
+	replyWithVoice       bool
+}
+
+type msgCtx struct {
+	bot         *Bot
+	msg         string
+	replyMarkup *echotron.MessageOptions
+}
+
+func (u *User) startMessagesChannel() {
+	log.Println("Starting messaging channel")
+
+	baseMessage := "MESSAGE CHANNEL:\n\n"
+	defer close(u.messageChan) // Chiude il canale quando la funzione termina
+
+	for ctx := range u.messageChan {
+		ctx.bot.loggingChannel <- fmt.Sprintf("sending message to user %v", u.ChatID)
+		ctx.bot.SendMessage(baseMessage+ctx.msg, u.ChatID, ctx.replyMarkup)
+	}
+
 }
 
 func (u *User) HasReachedUsageLimit() bool {
@@ -166,7 +187,7 @@ func (u *User) NewConversation() uuid.UUID {
 	return convUuid
 }
 
-func (u *User) SendMessagesToChatGPT(text string) (string, error) {
+func (u *User) sendMessagesToChatGPT(text string) (string, error) {
 	if u.SelectedConversation == uuid.Nil {
 		return "", fmt.Errorf("no conversation selected")
 	}
@@ -182,11 +203,13 @@ func (u *User) SendMessagesToChatGPT(text string) (string, error) {
 	conv.AppendMessage(resp.Message.Content, openai.ChatMessageRoleAssistant)
 	u.updateTokenUsage(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
+	log.Println("setting title")
 	if conv.Title == "" {
 		usage, err := conv.setTitle()
 		if err != nil {
 			log.Println("unable to set title:", err)
 		}
+		log.Println("title set")
 		u.updateTokenUsage(usage.PromptTokens, usage.CompletionTokens)
 	}
 
@@ -198,7 +221,7 @@ func NewUser(admin bool, userID int64) *User {
 	if admin {
 		status = Admin
 	}
-	return &User{
+	user := &User{
 		ChatID:               userID,
 		Status:               status,
 		Conversations:        make(map[uuid.UUID]*Conversation),
@@ -207,7 +230,12 @@ func NewUser(admin bool, userID int64) *User {
 		LastUpdate:           time.Now(),
 		StrikeCount:          0,
 		UsageMap:             make(map[string]gpt.Model),
+		messageChan:          make(chan *msgCtx),
+		replyWithVoice:       false,
 	}
+
+	go user.startMessagesChannel()
+	return user
 }
 
 func (u *User) GetConversationStats(convID uuid.UUID) string {

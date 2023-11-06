@@ -50,7 +50,7 @@ func GetTitleContext(engineID string, messages []openai.ChatCompletionMessage) *
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: Personalities["TitleGenerator"],
+				Content: HelperPersonalities["TitleGenerator"],
 			},
 		},
 	}
@@ -59,7 +59,7 @@ func GetTitleContext(engineID string, messages []openai.ChatCompletionMessage) *
 			ctx.Messages = append(ctx.Messages, message)
 		}
 	}
-	log.Println("%v", ctx)
+	log.Printf("%v", ctx)
 	return ctx
 }
 
@@ -69,7 +69,7 @@ func SummarizatorPrompt(engineID string, messages []openai.ChatCompletionMessage
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
-				Content: Personalities["ConversationalSynthesizer"],
+				Content: HelperPersonalities["ConversationalSynthesizer"],
 			},
 		},
 	}

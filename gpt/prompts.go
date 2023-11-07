@@ -1,14 +1,12 @@
 package gpt
 
 import (
-	"log"
-
 	"github.com/sashabaranov/go-openai"
 )
 
-func MustBeApproved(engineID string) *openai.ChatCompletionRequest {
+func MustBeApproved(model *Model) *openai.ChatCompletionRequest {
 	return &openai.ChatCompletionRequest{
-		Model: engineID,
+		Model: model.Name,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
@@ -18,10 +16,10 @@ func MustBeApproved(engineID string) *openai.ChatCompletionRequest {
 	}
 }
 
-func CommandRestricted(engineID string) *openai.ChatCompletionRequest {
+func CommandRestricted(model *Model) *openai.ChatCompletionRequest {
 
 	return &openai.ChatCompletionRequest{
-		Model: engineID,
+		Model: model.Name,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
@@ -31,9 +29,9 @@ func CommandRestricted(engineID string) *openai.ChatCompletionRequest {
 	}
 }
 
-func NewChat(engineID string) *openai.ChatCompletionRequest {
+func NewChat(model *Model) *openai.ChatCompletionRequest {
 	return &openai.ChatCompletionRequest{
-		Model: engineID,
+		Model: model.Name,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
@@ -43,10 +41,9 @@ func NewChat(engineID string) *openai.ChatCompletionRequest {
 	}
 }
 
-func GetTitleContext(engineID string, messages []openai.ChatCompletionMessage) *openai.ChatCompletionRequest {
-	log.Println("Generating title for context...")
+func GetTitleContext(model *Model, messages []openai.ChatCompletionMessage) *openai.ChatCompletionRequest {
 	ctx := &openai.ChatCompletionRequest{
-		Model: engineID,
+		Model: model.Name,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
@@ -59,13 +56,12 @@ func GetTitleContext(engineID string, messages []openai.ChatCompletionMessage) *
 			ctx.Messages = append(ctx.Messages, message)
 		}
 	}
-	log.Printf("%v", ctx)
 	return ctx
 }
 
-func SummarizatorPrompt(engineID string, messages []openai.ChatCompletionMessage) *openai.ChatCompletionRequest {
+func SummarizatorPrompt(model *Model, messages []openai.ChatCompletionMessage) *openai.ChatCompletionRequest {
 	ctx := &openai.ChatCompletionRequest{
-		Model: engineID,
+		Model: model.Name,
 		Messages: []openai.ChatCompletionMessage{
 			{
 				Role:    openai.ChatMessageRoleSystem,
@@ -74,11 +70,18 @@ func SummarizatorPrompt(engineID string, messages []openai.ChatCompletionMessage
 		},
 	}
 
+	content := ""
+
 	for _, message := range messages {
 		if message.Role != openai.ChatMessageRoleSystem {
-			ctx.Messages = append(ctx.Messages, message)
+			content += message.Role + ": " + message.Content + "\n\n"
 		}
 	}
+
+	ctx.Messages = append(ctx.Messages, openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleUser,
+		Content: content,
+	})
 
 	return ctx
 }

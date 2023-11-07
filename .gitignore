@@ -1,8 +1,9 @@
-# config file
-gpt/openai_api_key
-elevenlabs/elevenlabs_api_key
-
-admin
+# api keys
+openai_api_key
+elevenlabs_api_key
 telegram_token
+admin
+
 users.json
 *.bk
+*.pprof

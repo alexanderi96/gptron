@@ -1,6 +1,8 @@
 package session
 
 import (
+	"sort"
+
 	"github.com/NicoNex/echotron/v3"
 	"github.com/alexanderi96/gptron/gpt"
 )
@@ -33,6 +35,12 @@ func getMainMenu(isAdmin bool) *echotron.ReplyKeyboardMarkup {
 }
 
 func (u *User) getListOfChats() *echotron.ReplyKeyboardMarkup {
+	convList := u.getConversationsAsList()
+
+	sort.Slice(convList, func(i, j int) bool {
+		return convList[i].LastUpdate.After(convList[j].LastUpdate)
+	})
+
 	menu := &echotron.ReplyKeyboardMarkup{
 		Keyboard: [][]echotron.KeyboardButton{
 			{
@@ -44,7 +52,12 @@ func (u *User) getListOfChats() *echotron.ReplyKeyboardMarkup {
 		Selective:       false,
 	}
 
-	for _, conv := range u.Conversations {
+	for _, conv := range convList {
+
+		if conv.Deleted {
+			continue
+		}
+
 		command := "/select "
 		if conv.Title == "" {
 			command += conv.ID.String()
@@ -61,10 +74,14 @@ func getConversationUI() *echotron.ReplyKeyboardMarkup {
 		Keyboard: [][]echotron.KeyboardButton{
 			{
 				{Text: "/back", RequestContact: false, RequestLocation: false},
-				{Text: "/stats", RequestContact: false, RequestLocation: false},
+				{Text: "/home", RequestContact: false, RequestLocation: false},
 			},
 			{
 				{Text: "/summarize", RequestContact: false, RequestLocation: false},
+				{Text: "/stats", RequestContact: false, RequestLocation: false},
+			},
+			{
+				{Text: "/generate_report", RequestContact: false, RequestLocation: false},
 				{Text: "/delete", RequestContact: false, RequestLocation: false},
 			},
 		},
@@ -95,7 +112,7 @@ func getPersonalityList() *echotron.ReplyKeyboardMarkup {
 	return menu
 }
 
-func getModelList() *echotron.ReplyKeyboardMarkup {
+func getModelList(isAdmin bool) *echotron.ReplyKeyboardMarkup {
 	menu := &echotron.ReplyKeyboardMarkup{
 		Keyboard: [][]echotron.KeyboardButton{
 			{
@@ -108,6 +125,9 @@ func getModelList() *echotron.ReplyKeyboardMarkup {
 	}
 
 	for _, model := range gpt.Models {
+		if model.Restricted && !isAdmin {
+			continue
+		}
 		menu.Keyboard = append(menu.Keyboard, []echotron.KeyboardButton{{Text: "/model " + model.Name}})
 	}
 

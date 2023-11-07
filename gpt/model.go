@@ -11,6 +11,7 @@ var (
 				Prompt:     0.0015,
 				Completion: 0.002,
 			},
+			Restricted: false,
 		},
 		"gpt-3.5-turbo-16k": {
 			Name:    "gpt-3.5-turbo-16k",
@@ -19,6 +20,7 @@ var (
 				Prompt:     0.003,
 				Completion: 0.004,
 			},
+			Restricted: true,
 		},
 		"gpt-4": {
 			Name:    "gpt-4",
@@ -27,6 +29,7 @@ var (
 				Prompt:     0.03,
 				Completion: 0.06,
 			},
+			Restricted: true,
 		},
 		"gpt-4-32k": {
 			Name:    "gpt-4-32k",
@@ -35,6 +38,7 @@ var (
 				Prompt:     0.06,
 				Completion: 0.12,
 			},
+			Restricted: true,
 		},
 	}
 )
@@ -46,10 +50,11 @@ type Pricing struct {
 }
 
 type Model struct {
-	Name    string
-	Context int
-	Pricing Pricing
-	Usage   openai.Usage
+	Name       string
+	Context    int
+	Pricing    Pricing
+	Usage      openai.Usage
+	Restricted bool
 }
 
 func (m *Model) GetCosts() *Pricing {

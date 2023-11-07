@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/NicoNex/echotron/v3"
@@ -51,34 +52,103 @@ type Conversation struct {
 }
 
 type User struct {
-	ChatID               int64
-	Status               UserStatus
-	Conversations        map[uuid.UUID]*Conversation
-	SelectedConversation uuid.UUID `json:"-"`
-	MenuState            MenuState `json:"-"`
-	CreationTime         time.Time
-	LastUpdate           time.Time
-	StrikeCount          int
-	UsageMap             map[string]gpt.Model
-	messageChan          chan *msgCtx
-	replyWithVoice       bool
+	ChatID                  int64
+	Status                  UserStatus
+	Conversations           map[uuid.UUID]*Conversation
+	SelectedConversation    uuid.UUID
+	MenuState               MenuState
+	CreationTime            time.Time
+	LastUpdate              time.Time
+	StrikeCount             int
+	UsageMap                map[string]gpt.Model
+	messageChan             chan *msgCtx
+	replyWithVoice          bool
+	lastSentMessageID       int
+	lastSentMessageIDOption echotron.MessageIDOptions
 }
 
 type msgCtx struct {
-	bot         *Bot
-	msg         string
-	replyMarkup *echotron.MessageOptions
+	initialMessageID   *echotron.MessageIDOptions
+	bot                *Bot
+	chatID             int64
+	msg                string
+	messageOptions     *echotron.MessageOptions
+	messageTextOptions *echotron.MessageTextOptions
+}
+
+func (c *Conversation) GenerateReport() string {
+	report := fmt.Sprintf(
+		"## Conversation Report\n"+
+			"- **Conversation ID:** %s\n"+
+			"- **Title:** %s\n"+
+			"- **Personality:** %s\n"+
+			"- **Creation Time:** %s\n"+
+			"- **Last Update:** %s\n\n",
+		c.ID,
+		c.Title,
+		c.GptPersonality,
+		c.CreationTime.Format("2006-01-02 15:04:05"),
+		c.LastUpdate.Format("2006-01-02 15:04:05"),
+	)
+
+	cost := c.Model.GetCosts()
+
+	report += fmt.Sprintf(
+		"- **Model:** %s\n"+
+			"- **Total tokens:** %d ($%f)\n\n",
+		c.Model.Name,
+		c.Model.Usage.TotalTokens,
+		cost.Prompt+cost.Completion,
+	)
+
+	report += "### Messages\n\n"
+	for i, message := range c.Content {
+		report += fmt.Sprintf(
+			"**%s** - **%s**:\n\n%s\n\n",
+			message.CreationTime.Format("2006-01-02 15:04:05"),
+			message.Role,
+			message.Content,
+		)
+		if i != len(c.Content)-1 {
+			report += "---\n\n"
+		}
+	}
+
+	if c.Deleted {
+		report += fmt.Sprintf(
+			"### Deletion Details\n\n"+
+				"The conversation was deleted at: %s\n",
+			c.DeletionTime.Format("2006-01-02 15:04:05"),
+		)
+	}
+
+	return report
 }
 
 func (u *User) startMessagesChannel() {
-	log.Println("Starting messaging channel")
-
-	baseMessage := "MESSAGE CHANNEL:\n\n"
 	defer close(u.messageChan) // Chiude il canale quando la funzione termina
 
+	baseMessage := ""
+
 	for ctx := range u.messageChan {
-		ctx.bot.loggingChannel <- fmt.Sprintf("sending message to user %v", u.ChatID)
-		ctx.bot.SendMessage(baseMessage+ctx.msg, u.ChatID, ctx.replyMarkup)
+		b := ctx.bot
+
+		if ctx.initialMessageID != nil {
+			b.EditMessageText(baseMessage+ctx.msg, u.lastSentMessageIDOption, ctx.messageTextOptions)
+		} else {
+
+			initialMessage, err := b.SendMessage(baseMessage+ctx.msg, ctx.chatID, ctx.messageOptions)
+
+			if err != nil {
+				b.loggingChannel <- fmt.Sprintf("Error sending message to %d: %s", ctx.chatID, err)
+				return
+			}
+
+			u.lastSentMessageID = initialMessage.Result.ID
+			u.lastSentMessageIDOption = echotron.NewMessageID(ctx.chatID, initialMessage.Result.ID)
+
+		}
+
 	}
 
 }
@@ -103,7 +173,7 @@ func (u *User) GetMenu() (string, echotron.ReplyMarkup) {
 	case MenuStateSelectPersonality:
 		return "Select a personality from the list", getPersonalityList()
 	case MenuStateSelectModel:
-		return "Select a model from the list", getModelList()
+		return "Select a model from the list", getModelList(u.IsAdmin())
 	default:
 		return "Main Menu", getMainMenu(u.IsAdmin())
 	}
@@ -122,6 +192,7 @@ func (u *User) updateTokenUsage(promptTokens, completionTokens int) {
 	convModel := u.Conversations[u.SelectedConversation].Model
 	convModel.Usage.PromptTokens += promptTokens
 	convModel.Usage.CompletionTokens += completionTokens
+	convModel.Usage.TotalTokens = convModel.Usage.PromptTokens + convModel.Usage.CompletionTokens
 	u.Conversations[u.SelectedConversation].Model = convModel
 
 	model, exists := u.UsageMap[convModel.Name]
@@ -130,6 +201,7 @@ func (u *User) updateTokenUsage(promptTokens, completionTokens int) {
 	} else {
 		model.Usage.PromptTokens += promptTokens
 		model.Usage.CompletionTokens += completionTokens
+		model.Usage.TotalTokens = model.Usage.PromptTokens + model.Usage.CompletionTokens
 		u.UsageMap[convModel.Name] = model
 	}
 }
@@ -148,7 +220,7 @@ func (c *Conversation) Summarize(n int) (string, error) {
 
 	// Invia la richiesta
 	resp, err := gpt.SendMessagesToChatGPT(
-		gpt.SummarizatorPrompt(c.Model.Name, ctx.Messages),
+		gpt.SummarizatorPrompt(&c.Model, ctx.Messages),
 	)
 	if err != nil {
 		log.Print("Summarization error: ", err)
@@ -163,10 +235,8 @@ func (c *Conversation) Summarize(n int) (string, error) {
 }
 
 func (c *Conversation) setTitle() (openai.Usage, error) {
-	resp, err := gpt.SendMessagesToChatGPT(gpt.GetTitleContext(c.Model.Name, c.GetChatCompletionRequest().Messages))
-
+	resp, err := gpt.SendMessagesToChatGPT(gpt.GetTitleContext(&c.Model, c.GetChatCompletionRequest().Messages))
 	if err != nil {
-		log.Print("Title generation error: ", err)
 		c.Title = "New Chat with " + c.GptPersonality
 		return resp.Usage, err
 	} else {
@@ -187,7 +257,7 @@ func (u *User) NewConversation() uuid.UUID {
 	return convUuid
 }
 
-func (u *User) sendMessagesToChatGPT(text string) (string, error) {
+func (u *User) sendMessagesToChatGPT(text string, b *Bot) (string, error) {
 	if u.SelectedConversation == uuid.Nil {
 		return "", fmt.Errorf("no conversation selected")
 	}
@@ -203,22 +273,31 @@ func (u *User) sendMessagesToChatGPT(text string) (string, error) {
 	conv.AppendMessage(resp.Message.Content, openai.ChatMessageRoleAssistant)
 	u.updateTokenUsage(resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 
-	log.Println("setting title")
+	u.messageChan <- &msgCtx{
+		initialMessageID:   &u.lastSentMessageIDOption,
+		bot:                b,
+		chatID:             u.ChatID,
+		msg:                "Generating title",
+		messageOptions:     nil,
+		messageTextOptions: nil,
+	}
+	b.loggingChannel <- "Generating title for user " + strconv.FormatInt(u.ChatID, 10) + "'s conversation: " + conv.ID.String()
 	if conv.Title == "" {
 		usage, err := conv.setTitle()
 		if err != nil {
-			log.Println("unable to set title:", err)
+			b.loggingChannel <- "Unable to generate title for user " + strconv.FormatInt(u.ChatID, 10) + "'s conversation: " + conv.ID.String() + "\n" + err.Error()
 		}
-		log.Println("title set")
+		b.loggingChannel <- "Title generate for user " + strconv.FormatInt(u.ChatID, 10) + "'s conversation: " + conv.ID.String()
+
 		u.updateTokenUsage(usage.PromptTokens, usage.CompletionTokens)
 	}
 
 	return resp.Message.Content, nil
 }
 
-func NewUser(admin bool, userID int64) *User {
+func newUser(userID int64) *User {
 	status := Unreviewed
-	if admin {
+	if adminID == userID {
 		status = Admin
 	}
 	user := &User{
@@ -251,18 +330,27 @@ func (u *User) GetConversationStats(convID uuid.UUID) string {
 		"Modello: %s\n"+
 		"Token in ingresso: %d ($%f)\n"+
 		"Token in uscita: %d($%f)\n\n"+
-		"Costo totale: $%f", conv.Title, conv.GptPersonality, conv.Model.Name, conv.Model.Usage.PromptTokens, costs.Prompt, conv.Model.Usage.CompletionTokens, costs.Completion, costs.Prompt+costs.Completion)
+		"Token totali: %d ($%f)", conv.Title, conv.GptPersonality, conv.Model.Name, conv.Model.Usage.PromptTokens, costs.Prompt, conv.Model.Usage.CompletionTokens, costs.Completion, conv.Model.Usage.PromptTokens+conv.Model.Usage.CompletionTokens, costs.Prompt+costs.Completion)
 
 }
 
-func (u *User) GetGlobalStats() string {
+func (u *User) GetStatsForAllChats() string {
 	var longestConv *Conversation
+	var shortestConv *Conversation
+	var newestConv *Conversation
 	var oldestConv *Conversation
 
 	for _, conv := range u.Conversations {
-
-		if longestConv == nil || len(longestConv.Content) < len(conv.Content) {
+		if longestConv == nil || longestConv.Model.Usage.TotalTokens < conv.Model.Usage.TotalTokens {
 			longestConv = conv
+		}
+
+		if shortestConv == nil || shortestConv.Model.Usage.TotalTokens > conv.Model.Usage.TotalTokens {
+			shortestConv = conv
+		}
+
+		if newestConv == nil || newestConv.CreationTime.After(conv.CreationTime) {
+			newestConv = conv
 		}
 
 		if oldestConv == nil || oldestConv.CreationTime.Before(conv.CreationTime) {
@@ -274,29 +362,39 @@ func (u *User) GetGlobalStats() string {
 
 	for _, model := range u.UsageMap {
 		cost := model.GetCosts()
+		stats += "\n"
 		stats += fmt.Sprintf("Engine: %s\n", model.Name)
 		stats += fmt.Sprintf("Token in ingresso: %d ($%f)\n", model.Usage.PromptTokens, cost.Prompt)
 		stats += fmt.Sprintf("Token in uscita: %d ($%f)\n", model.Usage.CompletionTokens, cost.Completion)
-		stats += "\n"
+		stats += fmt.Sprintf("Token totali: %d ($%f)\n", model.Usage.TotalTokens, cost.Prompt+cost.Completion)
 	}
+
+	stats += "\n-----------------------------------------------------------\n\n"
 
 	tokens := u.GetTotalTokens()
 	costs := u.GetTotalCost()
 
-	stats += fmt.Sprintf("Totale token in ingresso: %d\n", tokens.PromptTokens)
-	stats += fmt.Sprintf("Totale token in uscita: %d\n", tokens.CompletionTokens)
+	stats += fmt.Sprintf("Totale token in ingresso: %d ($%f)\n", tokens.PromptTokens, costs.Prompt)
+	stats += fmt.Sprintf("Totale token in uscita: %d ($%f)\n", tokens.CompletionTokens, costs.Completion)
 	stats += "\n"
-	stats += fmt.Sprintf("Costo token ingresso: $%f\n", costs.Prompt)
-	stats += fmt.Sprintf("Costo token uscita: $%f\n", costs.Completion)
-	stats += "\n"
-	stats += fmt.Sprintf("*Costo totale*: $%f\n", costs.Prompt+costs.Completion)
+	stats += fmt.Sprintf("Token totali: %d ($%f)\n", tokens.TotalTokens, costs.Prompt+costs.Completion)
 	stats += "\n"
 
 	if longestConv != nil {
-		stats += fmt.Sprintf("Conversazione più lunga:%s\n\n", longestConv.Title)
+		longConvCost := longestConv.Model.GetCosts()
+		stats += fmt.Sprintf("Conversazione più lunga: %s\n%d tokens ($%f)\n\n", longestConv.Title, longestConv.Model.Usage.TotalTokens, longConvCost.Prompt+longConvCost.Completion)
+	}
+	if shortestConv != nil {
+		shortConvCost := shortestConv.Model.GetCosts()
+		stats += fmt.Sprintf("Conversazione più corta: %s\n%d tokens ($%f)\n\n", shortestConv.Title, shortestConv.Model.Usage.TotalTokens, shortConvCost.Prompt+shortConvCost.Completion)
+	}
+	if newestConv != nil {
+		newestConvCost := newestConv.Model.GetCosts()
+		stats += fmt.Sprintf("Conversazione più recente: %s\n%d tokens ($%f)\n\n", newestConv.Title, newestConv.Model.Usage.TotalTokens, newestConvCost.Prompt+newestConvCost.Completion)
 	}
 	if oldestConv != nil {
-		stats += fmt.Sprintf("Conversazione più vecchia:\n%s\n\n", oldestConv.Title)
+		oldestConvCost := oldestConv.Model.GetCosts()
+		stats += fmt.Sprintf("Conversazione più vecchia: %s\n%d tokens ($%f)\n\n", oldestConv.Title, oldestConv.Model.Usage.TotalTokens, oldestConvCost.Prompt+oldestConvCost.Completion)
 	}
 	return stats
 }
@@ -339,4 +437,12 @@ func (u *User) GetTotalCost() (cost gpt.Pricing) {
 		cost.Completion += conv.Model.GetCosts().Completion
 	}
 	return
+}
+
+func (u *User) getConversationsAsList() []*Conversation {
+	list := make([]*Conversation, 0)
+	for _, conv := range u.Conversations {
+		list = append(list, conv)
+	}
+	return list
 }

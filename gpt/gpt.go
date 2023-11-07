@@ -54,6 +54,7 @@ func SendVoiceToWhisper(voicePath string) (string, error) {
 }
 
 func SendMessagesToChatGPT(ctx *openai.ChatCompletionRequest) (*GptResponse, error) {
+
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		*ctx,

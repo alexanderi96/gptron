@@ -6,19 +6,28 @@ var (
 	Models = map[string]Model{
 		"gpt-3.5-turbo": {
 			Name:    "gpt-3.5-turbo",
-			Context: 4097,
+			Context: 16385,
 			Pricing: Pricing{
-				Prompt:     0.0015,
+				Prompt:     0.001,
 				Completion: 0.002,
 			},
 			Restricted: false,
 		},
-		"gpt-3.5-turbo-16k": {
-			Name:    "gpt-3.5-turbo-16k",
-			Context: 16385,
+		"gpt-4-1106-preview": {
+			Name:    "gpt-4-1106-preview",
+			Context: 128000,
 			Pricing: Pricing{
-				Prompt:     0.003,
-				Completion: 0.004,
+				Prompt:     0.01,
+				Completion: 0.03,
+			},
+			Restricted: true,
+		},
+		"gpt-4-1106-vision-preview": {
+			Name:    "gpt-4-1106-vision-preview",
+			Context: 128000,
+			Pricing: Pricing{
+				Prompt:     0.01,
+				Completion: 0.03,
 			},
 			Restricted: true,
 		},
@@ -28,15 +37,6 @@ var (
 			Pricing: Pricing{
 				Prompt:     0.03,
 				Completion: 0.06,
-			},
-			Restricted: true,
-		},
-		"gpt-4-32k": {
-			Name:    "gpt-4-32k",
-			Context: 32768,
-			Pricing: Pricing{
-				Prompt:     0.06,
-				Completion: 0.12,
 			},
 			Restricted: true,
 		},

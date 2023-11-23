@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,8 @@ import (
 	"github.com/sashabaranov/go-openai"
 )
 
-const filePath = "users.json"
+const appDir = "gptron"
+const dataFileName = "users.json"
 
 var (
 	//go:embed telegram_token
@@ -41,6 +43,8 @@ var (
 		// {Command: "/whitelist", Description: "whitelist user"},
 		// {Command: "/blacklist", Description: "blacklist user"},
 	}
+
+	fullFilePath string
 )
 
 type Bot struct {
@@ -68,6 +72,20 @@ func init() {
 	Dsp = echotron.NewDispatcher(telegramToken, NewBot)
 	go setCommands()
 
+	homePath, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fullFilePath = homePath + "/" + appDir + "/" + dataFileName
+}
+
+func createDirIfNotExist(filePath string) error {
+	directory := filepath.Dir(filePath)
+	if _, err := os.Stat(directory); os.IsNotExist(err) {
+		err := os.MkdirAll(directory, 0755)
+		return err
+	}
+	return nil
 }
 
 func setCommands() {
@@ -654,7 +672,12 @@ func (b *Bot) saveUsers() error {
 		return err
 	}
 
-	err = os.WriteFile(filePath, jsonData, 0644)
+	if err := createDirIfNotExist(fullFilePath); err != nil {
+		b.loggingChannel <- fmt.Errorf("failed to create directory: %w", err).Error()
+		return err
+	}
+
+	err = os.WriteFile(fullFilePath, jsonData, 0644)
 	if err != nil {
 		b.loggingChannel <- fmt.Errorf("failed to write file: %w", err).Error()
 		return err
@@ -666,14 +689,14 @@ func (b *Bot) saveUsers() error {
 func (b *Bot) loadUsers() error {
 	b.loggingChannel <- "Loading users..."
 
-	_, err := os.Stat(filePath)
+	_, err := os.Stat(fullFilePath)
 	if os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("failed to stat file: %w", err)
 	}
 
-	jsonData, err := os.ReadFile(filePath)
+	jsonData, err := os.ReadFile(fullFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
 	}

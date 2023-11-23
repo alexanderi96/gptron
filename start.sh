@@ -1,3 +1,4 @@
 #!/bin/bash
-nohup ~/go/bin/gptron  >> ~/gptron.log 2>&1 &
 
+mkdir -p ~/gptron
+nohup ~/go/bin/gptron  >> ~/gptron/gptron.log 2>&1 &

@@ -85,6 +85,13 @@ func createDirIfNotExist(filePath string) error {
 		err := os.MkdirAll(directory, 0755)
 		return err
 	}
+
+	// Crea il file se non esiste già
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		if _, err := os.Create(filePath); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
